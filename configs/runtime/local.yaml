@@ -1,0 +1,5 @@
+# Chạy thử trên máy cá nhân
+runtime: local
+device: auto
+num_gpus: 1
+workers: 2

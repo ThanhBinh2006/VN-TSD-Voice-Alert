@@ -1,0 +1,11 @@
+# Chạy huấn luyện chính thức trên Kaggle (Notebook: Accelerator = GPU T4 x2, Internet = On)
+runtime: kaggle
+device: cuda
+num_gpus: 2                     # torchrun --nproc_per_node=2
+workers: 4
+paths:
+  raw_dir: /kaggle/input/vietnamese-traffic-signs   # TODO: kiểm tra đúng tên sau khi Add Data -> maitam/vietnamese-traffic-signs
+  processed_dir: /kaggle/working/data/processed
+  outputs_dir: /kaggle/working/outputs
+  uploads_dir: /kaggle/working/outputs/uploads
+  db_path: /kaggle/working/outputs/traffic_sign.db

@@ -1,0 +1,10 @@
+data/raw/
+data/processed/
+outputs/
+models/yolo/*.pt
+models/faster_rcnn/*.pth
+*.db
+__pycache__/
+.pytest_cache/
+venv/
+.ipynb_checkpoints/

@@ -1,0 +1,65 @@
+# Owner: Cả nhóm (Thành viên 1 giữ file này).
+# Cấu hình BẤT BIẾN dùng chung cho cả hai mô hình để so sánh công bằng.
+# Các file trong configs/pipelines/ KHÔNG được ghi đè: seed, data.*, train.batch_size, eval.batch_size, train.primary_metric.
+seed: 42
+
+data:
+  root: null                    # thư mục processed dùng để train/eval; null = paths.processed_dir.
+                                # Trên Kaggle: đặt đường dẫn dataset đã gắn (Add Input) qua notebook / --data-root.
+  image_size: 640               # letterbox 640x640 cho cả hai mô hình
+  pad_value: 114
+  split: {train: 0.7, val: 0.2, test: 0.1}   # TODO: nhóm chốt tỉ lệ
+  num_classes: null             # TODO: số lớp biển báo của dataset. Để null thì đếm từ configs/classes.csv.
+                                # Faster R-CNN: box predictor = num_classes + 1 (thêm background).
+
+train:
+  # TỔNG batch trên tất cả GPU. Faster R-CNN (DDP) phải chia bằng ts_alert.runtime.batch.per_rank_batch;
+  # YOLO truyền nguyên tổng để Ultralytics tự chia GPU.
+  batch_size: 8
+  early_stopping_patience: 10   # early stopping (epoch)
+  amp: true                     # mixed precision
+  primary_metric: mAP50-95
+  run_name: null                # tên run; null = lấy tên pipeline. Notebook tự sinh: {pipeline}_s{seed}_ep{epochs}_bs{batch}[_online]_{hash8}
+  require_wandb: false          # true = bắt buộc log lên W&B (khi đó phải điền mục project bên dưới)
+
+eval:
+  batch_size: 16                # TỔNG trên mọi GPU, hai pipeline phải giống nhau
+  split: test
+  auto_eval_test: true          # true = fit() tự đánh giá tập Test sau khi huấn luyện xong
+  metrics: [mAP50-95, mAP50, mAP75, AR100]
+  benchmark: {warmup: 5, num_frames: 100}   # đo FPS
+
+inference:
+  conf_threshold: 0.25
+  iou_threshold: 0.5
+
+project:                        # Tuỳ chọn: theo dõi thí nghiệm bằng Weights & Biases
+  wandb_base_url: null          # TODO: null = wandb.ai; điền nếu nhóm dùng server riêng
+  wandb_entity: null            # TODO: tên team/tài khoản W&B
+  wandb_project: TSD-Voice-Alert
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  classes_csv: configs/classes.csv
+  outputs_dir: outputs
+  uploads_dir: outputs/uploads
+  db_path: outputs/traffic_sign.db       # TODO: Thành viên 5 có thể đổi nếu dùng DB khác
+
+postprocess:                    # Owner: Thành viên 4
+  position:                     # chia theo tâm ngang của bbox / chiều rộng khung hình
+    left_max: 0.33
+    right_min: 0.66
+  dedup:
+    iou_match: 0.3              # TODO: chỉnh theo thực nghiệm
+    lost_frames: 15             # TODO: chỉnh theo thực nghiệm
+  tts:
+    engine: gtts                # gtts (cần internet) | pyttsx3 (offline)
+    lang: vi
+    template: "Chú ý, {position_text} có biển {name}"
+    position_text: {left: "bên trái", front: "phía trước", right: "bên phải"}
+
+app:                            # Owner: Thành viên 3 (thêm/bớt khoá tuỳ ý)
+  host: 127.0.0.1
+  port: 5000
+  max_upload_mb: 200

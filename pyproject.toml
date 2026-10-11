@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ts_alert"
+version = "0.1.0"
+requires-python = ">=3.10,<3.14"
+# Ràng buộc tối thiểu để cài được trên Kaggle/Colab mà không phá gói có sẵn.
+# Bộ phiên bản GHIM CỤ THỂ cho máy local nằm ở requirements.txt.
+dependencies = [
+    "numpy>=2.0",
+    "PyYAML>=6.0",
+    "opencv-python-headless>=4.10",
+    "pandas>=2.2",
+    "matplotlib>=3.9",
+    "gTTS>=2.5",
+    "pyttsx3>=2.99",
+    "imageio-ffmpeg>=0.6",
+]
+
+[project.optional-dependencies]
+# torch / torchvision KHÔNG nằm ở đây: Kaggle đã cài sẵn; local cài qua requirements.txt.
+detect = [
+    "ultralytics==8.4.175",
+    "torchmetrics==1.9.0",
+    "pycocotools==2.0.11",
+]
+tracking = ["wandb==0.30.0"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["ts_alert*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

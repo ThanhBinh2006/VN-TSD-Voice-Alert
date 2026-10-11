@@ -1,0 +1,8 @@
+-- Owner: Thành viên 5 — TODO: thiết kế bảng của nhóm (SQLite).
+--
+-- Cần lưu được (xem ts_alert/db/interface.py):
+--   * job xử lý: input, model, output, số biển báo duy nhất, số lần giọng nói phát, thời gian layer / TTS / tổng, trạng thái
+--   * detection: biển nào, khung hình nào, timestamp, bbox, độ tin cậy, vị trí (left | right | front)
+--   * voice event: câu đã đọc, detection kích hoạt, timestamp, đường dẫn file âm thanh
+--
+-- Gợi ý khởi đầu: 3 bảng processing_job, detection, voice_event (detection/voice_event có khoá ngoại job_id).

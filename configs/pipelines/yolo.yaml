@@ -1,0 +1,26 @@
+# Owner: Thành viên 1 — pipeline YOLO + preprocessing online.
+# Online ops bên dưới chỉ chạy khi enabled: true.
+# KHÔNG đặt train.batch_size / eval.batch_size ở đây. Cả hai lấy từ configs/shared.yaml.
+pipeline: yolo
+inherits: configs/shared.yaml
+
+model:
+  family: yolo
+  name: yolo26m                 # ultralytics==8.4.175
+  pretrained: yolo26m.pt
+  weights: models/yolo/best.pt  # checkpoint fine-tune dùng cho web app / suy luận
+
+train:
+  epochs: 50                    # TODO: chỉnh theo thực nghiệm
+  lr0: 0.01
+  optimizer: auto
+
+online_preprocess:
+  enabled: false
+  letterbox: true
+  normalize: true
+  hflip: false
+  color_jitter: false
+  mosaic: false                 # enabled=false thì phải tắt mosaic/mixup của Ultralytics (mặc định của nó là bật)
+  mixup: false
+  jitter: 0.1

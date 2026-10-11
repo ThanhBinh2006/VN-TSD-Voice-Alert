@@ -1,0 +1,29 @@
+# Owner: Thành viên 2 — pipeline Faster R-CNN + preprocessing online.
+# Online ops bên dưới chỉ chạy khi enabled: true.
+# KHÔNG đặt train.batch_size / eval.batch_size ở đây. Cả hai lấy từ configs/shared.yaml.
+pipeline: faster_rcnn
+inherits: configs/shared.yaml
+
+model:
+  family: faster_rcnn
+  backbone: resnet50            # torchvision fasterrcnn_resnet50_fpn (torchvision==0.24.1)
+  pretrained: true              # COCO_V1
+  weights: models/faster_rcnn/best.pth
+  # Box predictor phải là data.num_classes + 1 (thêm background).
+  # DataLoader phải dùng per_rank_batch để tổng batch không bị áp dụng lên MỖI GPU.
+
+train:
+  epochs: 20                    # TODO: chỉnh theo thực nghiệm
+  lr: 0.005
+  momentum: 0.9
+  weight_decay: 0.0005
+
+online_preprocess:
+  enabled: false
+  letterbox: true
+  normalize: true
+  hflip: false
+  color_jitter: false
+  mosaic: false
+  mixup: false
+  jitter: 0.1
