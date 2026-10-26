@@ -153,3 +153,21 @@ Kiểm tra:
 - `test_letterbox_sample`: Kiểm tra kích thước canvas $640\times 640$, viền pad 114 và độ chính xác chuyển đổi toạ độ YOLO.
 - `test_split_samples_no_leakage`: Kiểm tra phân chia không có rò rỉ giữa các tập.
 - `test_write_data_yaml`: Kiểm tra cấu trúc file cấu hình Ultralytics YOLO.
+
+---
+
+## 6. Hiện thực Hóa Pipeline Huấn luyện & Suy luận YOLO26m (Thành viên 1)
+
+Song song với quy trình tiền xử lý, pipeline YOLO26m (Ultralytics 8.4.175) đã được hiện thực hoàn chỉnh theo chuẩn hợp đồng dữ liệu:
+1. **Nạp mô hình (`ts_alert/pipelines/yolo/model.py`)**:
+   - `load_model(weights_or_name)`: Cơ chế nạp muộn (late import) `from ultralytics import YOLO` giúp khởi động Web App và các tác vụ kiểm thử nhẹ không bị tải chậm bởi torch.
+2. **Suy luận thời gian thực (`ts_alert/pipelines/yolo/infer.py`)**:
+   - `YoloDetector.predict(frame)`: Nhận frame BGR gốc, chạy suy luận YOLO với ngưỡng confidence `conf_threshold` và IoU `iou_threshold`, tự động ánh xạ class index sang tên biển báo tiếng Việt trong `configs/classes.csv`.
+   - Kết quả trả về đúng định dạng chuẩn hợp đồng `DATA_CONTRACT`:
+     `[{"bbox": [x1, y1, x2, y2], "label": str, "class_id": int, "confidence": float}]`
+3. **Quy trình Huấn luyện (`ts_alert/pipelines/yolo/train.py`)**:
+   - `YoloPipeline.fit()`: Đọc `data/processed/data.yaml`, cấu hình tổng batch, kích thước ảnh $640\times 640$, seed 42, lưu nhật ký theo dõi vào thư mục chuẩn `outputs/yolo/<run_name>/`, tự động lưu checkpoint tốt nhất vào `models/yolo/best.pt`.
+4. **Online Augmentation (`ts_alert/data/preprocess_online.py`)**:
+   - `build_online_transforms(cfg, backend="ultralytics")`:
+     - Khi `online_preprocess.enabled = false`: Tắt triệt để toàn bộ mosaic, mixup, fliplr, hsv jitter mặc định của Ultralytics nhằm bảo đảm tính công bằng tuyệt đối khi so sánh thực nghiệm với Faster R-CNN trên tập offline letterbox.
+     - Khi `online_preprocess.enabled = true`: Kích hoạt mosaic (1.0), mixup (0.15), jitter tỉ lệ và tắt `hflip` (vì biển báo có ý nghĩa định hướng trái/phải).

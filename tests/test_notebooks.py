@@ -18,4 +18,5 @@ def test_notebook_valid(path):
     assert nb["nbformat"] == 4
     for i, cell in enumerate(nb["cells"]):
         if cell["cell_type"] == "code":
-            ast.parse("".join(cell["source"]), filename=f"{path.name}#{i}")
+            clean = [l for l in cell["source"] if not l.strip().startswith(("!", "%"))]
+            ast.parse("".join(clean), filename=f"{path.name}#{i}")
