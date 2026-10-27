@@ -55,33 +55,36 @@ def _get_class_table(class_table: str | Path | None = None) -> Path:
 
 
 def class_distribution(data_root: Path, class_table: str | Path | None = None) -> Path:
-    """Đếm số box theo lớp, vẽ biểu đồ cột -> figures/class_distribution.png (và figures/raw/01_class_distribution.png)."""
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    """Đếm số box theo lớp, vẽ biểu đồ cột -> figures/raw/01_class_distribution.png."""
+    out_dir = FIG_DIR / "raw"
+    out_dir.mkdir(parents=True, exist_ok=True)
     c_table = _get_class_table(class_table)
     classes = load_classes(c_table)
     lbl_dir = data_root / "labels" if (data_root / "labels").is_dir() else data_root
     boxes = read_yolo_labels(lbl_dir)
-    out_path = FIG_DIR / "class_distribution.png"
+    out_path = out_dir / "01_class_distribution.png"
     plot_class_distribution(boxes, classes, out_path, is_raw=True)
     return out_path
 
 
 def box_size_stats(data_root: Path, image_size: int = 640) -> Path:
-    """Thống kê w/h/diện tích box (tương đối theo ảnh) -> figures/box_sizes.png."""
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    """Thống kê w/h/diện tích box (tương đối theo ảnh) -> figures/raw/03_box_dimensions.png."""
+    out_dir = FIG_DIR / "raw"
+    out_dir.mkdir(parents=True, exist_ok=True)
     lbl_dir = data_root / "labels" if (data_root / "labels").is_dir() else data_root
     boxes = read_yolo_labels(lbl_dir, image_size_px=image_size)
-    out_path = FIG_DIR / "box_sizes.png"
+    out_path = out_dir / "03_box_dimensions.png"
     plot_box_dimensions(boxes, out_path, image_size=image_size)
     return out_path
 
 
 def center_heatmap(data_root: Path) -> Path:
-    """Heatmap vị trí tâm box -> figures/center_heatmap.png."""
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+    """Heatmap vị trí tâm box -> figures/raw/04_box_center_heatmap.png."""
+    out_dir = FIG_DIR / "raw"
+    out_dir.mkdir(parents=True, exist_ok=True)
     lbl_dir = data_root / "labels" if (data_root / "labels").is_dir() else data_root
     boxes = read_yolo_labels(lbl_dir)
-    out_path = FIG_DIR / "center_heatmap.png"
+    out_path = out_dir / "04_box_center_heatmap.png"
     plot_box_center_heatmap(boxes, out_path)
     return out_path
 
@@ -137,15 +140,6 @@ def main(argv=None) -> None:
             dhash_size=args.dhash_size,
             dhash_hamming=args.dhash_hamming,
         )
-        # Đồng bộ các biểu đồ chính ra analysis/figures/ cho notebook 01_data_analysis.ipynb
-        raw_fig_dir = FIG_DIR / "raw"
-        if raw_fig_dir.is_dir():
-            if (raw_fig_dir / "01_class_distribution.png").exists():
-                shutil.copy2(raw_fig_dir / "01_class_distribution.png", FIG_DIR / "class_distribution.png")
-            if (raw_fig_dir / "03_box_dimensions.png").exists():
-                shutil.copy2(raw_fig_dir / "03_box_dimensions.png", FIG_DIR / "box_sizes.png")
-            if (raw_fig_dir / "04_box_center_heatmap.png").exists():
-                shutil.copy2(raw_fig_dir / "04_box_center_heatmap.png", FIG_DIR / "center_heatmap.png")
 
 
 if __name__ == "__main__":
