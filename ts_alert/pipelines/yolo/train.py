@@ -38,11 +38,19 @@ class YoloPipeline(BasePipeline):
         run_name = cfg["train"].get("run_name") or f"yolo_s{cfg['seed']}_ep{cfg['train']['epochs']}_bs{cfg['train']['batch_size']}"
         run_dir = make_run_dir(outputs_dir, "yolo", run_name, cfg)
 
-        # 2. Chuẩn bị đường dẫn data.yaml
+        # 2. Chuẩn bị đường dẫn data.yaml (tạo bản runtime với path chuẩn xác cho Kaggle/Local)
         processed_root = get_processed_root(cfg)
-        data_yaml = processed_root / "data.yaml"
-        if not data_yaml.exists():
-            raise FileNotFoundError(f"Không tìm thấy data.yaml tại {data_yaml}. Hãy chạy run_preprocess trước.")
+        source_yaml = processed_root / "data.yaml"
+        if not source_yaml.exists():
+            raise FileNotFoundError(f"Không tìm thấy data.yaml tại {source_yaml}. Hãy kiểm tra đường dẫn dataset.")
+
+        import yaml
+        with open(source_yaml, "r", encoding="utf-8") as f:
+            yaml_data = yaml.safe_load(f)
+        yaml_data["path"] = processed_root.resolve().as_posix()
+        runtime_yaml = run_dir / "data.yaml"
+        with open(runtime_yaml, "w", encoding="utf-8") as f:
+            yaml.dump(yaml_data, f, allow_unicode=True, sort_keys=False)
 
         # 3. Nạp model ban đầu
         pretrained = cfg["model"].get("pretrained", "yolo26m.pt")
@@ -51,7 +59,7 @@ class YoloPipeline(BasePipeline):
         # 4. Tham số huấn luyện Ultralytics
         online_args = build_online_transforms(cfg, "ultralytics")
         train_args = {
-            "data": str(data_yaml),
+            "data": str(runtime_yaml),
             "epochs": int(cfg["train"]["epochs"]),
             "batch": int(cfg["train"]["batch_size"]),
             "imgsz": int(cfg["data"]["image_size"]),
