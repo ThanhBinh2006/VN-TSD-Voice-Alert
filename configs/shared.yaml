@@ -8,7 +8,7 @@ data:
                                 # Trên Kaggle: đặt đường dẫn dataset đã gắn (Add Input) qua notebook / --data-root.
   image_size: 640               # letterbox 640x640 cho cả hai mô hình
   pad_value: 114
-  split: {train: 0.7, val: 0.2, test: 0.1}   # TODO: nhóm chốt tỉ lệ
+  split: {train: 0.7, val: 0.15, test: 0.15}   # TODO: nhóm chốt tỉ lệ
   num_classes: null             # TODO: số lớp biển báo của dataset. Để null thì đếm từ configs/classes.csv.
                                 # Faster R-CNN: box predictor = num_classes + 1 (thêm background).
 
