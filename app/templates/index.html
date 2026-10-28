@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cảnh báo biển báo giao thông</title>
+  <link rel="preload" href="{{ url_for('static', filename='fonts/InterDisplay-Medium.woff') }}" as="font" type="font/woff" crossorigin>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a class="brand" href="#/">
+        <svg class="brand-sign" viewBox="0 0 40 40" aria-hidden="true">
+          <circle cx="20" cy="20" r="16" fill="#fff" stroke="#D52B1E" stroke-width="6"/>
+          <path d="M14.5 25.5 L20 13.5 L25.5 25.5" fill="none" stroke="#0F1215" stroke-width="3" stroke-linejoin="round"/>
+        </svg>
+        <span>Cảnh báo biển báo giao thông</span>
+      </a>
+      <p id="server-status" class="status-chip" role="status"><i></i><span>Đang kết nối server…</span></p>
+    </div>
+  </header>
+
+  <main class="layout">
+    <div class="workspace">
+
+      <!-- Màn hình bắt đầu: giới thiệu ngắn + khu tải file lên -->
+      <section id="home" class="home">
+        <div class="hero">
+          <h1>Nhận diện biển báo trong video, cảnh báo bằng giọng nói.</h1>
+          <p class="lede">Tải lên video hành trình hoặc ảnh chụp đường. Hệ thống tìm biển báo, xác định biển nằm bên trái, phía trước hay bên phải, rồi đọc cảnh báo đúng lúc biển xuất hiện.</p>
+        </div>
+
+        <form id="upload-form" class="stage upload" novalidate>
+          <label id="drop-zone" class="drop" for="file-input">
+            <input id="file-input" name="file" type="file" class="visually-hidden">
+            <svg class="drop-icon" viewBox="0 0 48 48" aria-hidden="true">
+              <path d="M24 31V13M16 21l8-8 8 8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M10 30v5a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3v-5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            </svg>
+            <span class="drop-title">Kéo thả video hoặc ảnh vào đây</span>
+            <span class="drop-hint">hoặc bấm để chọn file từ máy</span>
+            <span id="file-name" class="drop-file" hidden></span>
+          </label>
+          <p id="accept-hint" class="stage-hint"></p>
+
+          <div class="upload-row">
+            <fieldset class="models">
+              <legend class="visually-hidden">Mô hình nhận diện</legend>
+              <label class="segment">
+                <input type="radio" name="model" value="yolo" checked>
+                <span class="segment-name">YOLO26m</span>
+                <span class="segment-desc">nhanh hơn</span>
+              </label>
+              <label class="segment">
+                <input type="radio" name="model" value="faster_rcnn">
+                <span class="segment-name">Faster R-CNN</span>
+                <span class="segment-desc">chính xác hơn</span>
+              </label>
+            </fieldset>
+            <button id="submit-btn" class="button light" type="submit">Bắt đầu xử lý</button>
+          </div>
+          <p id="form-error" class="form-error" role="alert"></p>
+
+          <div id="upload-progress" class="upload-progress" hidden>
+            <div class="progress-row"><span>Đang tải file lên</span><span id="upload-pct" class="num">0%</span></div>
+            <div class="track"><div id="upload-fill" class="track-fill"></div></div>
+          </div>
+        </form>
+      </section>
+
+      <!-- Chi tiết một job -->
+      <section id="job-view" class="job" hidden aria-labelledby="job-title">
+        <div class="job-head">
+          <div class="job-heading">
+            <h1 id="job-title" class="job-title"></h1>
+            <ul id="job-meta" class="chips"></ul>
+          </div>
+          <div class="job-actions">
+            <a id="download-link" class="button dark" href="#" hidden>Tải kết quả về máy</a>
+            <button id="new-btn" class="button outline" type="button">Xử lý file khác</button>
+          </div>
+        </div>
+
+        <!-- Khối tối: màn hình xử lý, rồi video kết quả + dải đường 3 làn -->
+        <div class="stage job-stage">
+          <div id="progress-panel" class="processing-screen">
+            <p id="stage-text" class="processing-stage"></p>
+            <p id="progress-pct" class="processing-pct num"></p>
+            <div class="track"><div id="progress-fill" class="track-fill"></div></div>
+            <p id="progress-detail" class="processing-detail num"></p>
+          </div>
+
+          <div id="error-panel" class="error-panel" role="alert" hidden>
+            <p class="error-title">Không xử lý được file này</p>
+            <p id="error-message" class="error-message"></p>
+            <p class="stage-hint">Kiểm tra file có mở được bằng trình phát video trên máy không, rồi thử lại. Nếu lỗi nhắc tới
+              <code>NotImplementedError</code> thì phần đó của nhóm chưa hiện thực xong.</p>
+          </div>
+
+          <div id="result" hidden>
+            <div class="screen">
+              <video id="result-video" controls playsinline preload="metadata"></video>
+              <img id="result-image" alt="Ảnh kết quả đã đánh dấu biển báo" hidden>
+              <ul id="hud" class="hud" aria-label="Thông số xử lý"></ul>
+              <!-- Câu cảnh báo hiện như bảng LED trên cao tốc, đúng lúc giọng nói phát -->
+              <p id="caption" class="led" aria-live="polite" hidden></p>
+            </div>
+
+            <div id="road-wrap" class="road-wrap">
+              <div id="road" class="road" aria-label="Các lần cảnh báo theo thời gian và vị trí">
+                <div class="lane" data-lane="left"><span class="lane-name">Trái</span></div>
+                <div class="lane" data-lane="front"><span class="lane-name">Trước</span></div>
+                <div class="lane" data-lane="right"><span class="lane-name">Phải</span></div>
+                <div id="playhead" class="playhead" aria-hidden="true"></div>
+              </div>
+              <div class="road-axis num"><span>0:00</span><span id="road-end"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Một dải số liệu chia 4 cột bằng đường kẻ mảnh (hình minh hoạ vẽ bằng SVG trong app.js) -->
+        <section id="insights" class="panel insights" hidden aria-label="Số liệu xử lý">
+          <div class="insight"><h2>Tốc độ xử lý</h2><div id="ins-speed" class="insight-body"></div></div>
+          <div class="insight"><h2>Vị trí biển báo</h2><div id="ins-position" class="insight-body"></div></div>
+          <div class="insight"><h2>Thời gian từng bước</h2><div id="ins-timing" class="insight-body"></div></div>
+          <div class="insight"><h2>Mật độ biển báo</h2><div id="ins-density" class="insight-body"></div></div>
+        </section>
+
+        <section id="events-card" class="panel events-card" hidden aria-labelledby="events-title">
+          <h2 id="events-title">Các lần cảnh báo bằng giọng nói</h2>
+          <p id="events-empty" class="hint" hidden>Không có biển báo nào được phát hiện nên không có cảnh báo.</p>
+          <ol id="events" class="timeline"></ol>
+        </section>
+      </section>
+    </div>
+
+    <aside class="history" aria-labelledby="history-title">
+      <h2 id="history-title">Lịch sử xử lý</h2>
+      <p id="history-empty" class="hint">Chưa có file nào. File bạn xử lý sẽ hiện ở đây.</p>
+      <ol id="history-list" class="history-list"></ol>
+    </aside>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
