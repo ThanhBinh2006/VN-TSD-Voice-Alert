@@ -48,9 +48,17 @@ class YoloPipeline(BasePipeline):
         with open(source_yaml, "r", encoding="utf-8") as f:
             yaml_data = yaml.safe_load(f)
         yaml_data["path"] = processed_root.resolve().as_posix()
-        runtime_yaml = run_dir / "data.yaml"
+
+        # Lưu runtime data.yaml tại outputs_dir để tránh bị DDP đa GPU xóa nhầm khi khởi tạo run_dir
+        runtime_yaml = outputs_dir / f"data_runtime_{cfg['seed']}.yaml"
         with open(runtime_yaml, "w", encoding="utf-8") as f:
             yaml.dump(yaml_data, f, allow_unicode=True, sort_keys=False)
+
+        # Lưu thêm 1 bản dự phòng ngay trong run_dir
+        try:
+            shutil.copy2(runtime_yaml, run_dir / "data.yaml")
+        except Exception:
+            pass
 
         # 3. Nạp model ban đầu
         pretrained = cfg["model"].get("pretrained", "yolo26m.pt")
@@ -59,7 +67,7 @@ class YoloPipeline(BasePipeline):
         # 4. Tham số huấn luyện Ultralytics
         online_args = build_online_transforms(cfg, "ultralytics")
         train_args = {
-            "data": str(runtime_yaml),
+            "data": runtime_yaml.resolve().as_posix(),
             "epochs": int(cfg["train"]["epochs"]),
             "batch": int(cfg["train"]["batch_size"]),
             "imgsz": int(cfg["data"]["image_size"]),
@@ -68,7 +76,7 @@ class YoloPipeline(BasePipeline):
             "amp": bool(cfg["train"].get("amp", True)),
             "lr0": float(cfg["train"].get("lr0", 0.01)),
             "optimizer": cfg["train"].get("optimizer", "auto"),
-            "project": str(run_dir.parent),
+            "project": run_dir.parent.resolve().as_posix(),
             "name": run_dir.name,
             "exist_ok": True,
             **online_args,
