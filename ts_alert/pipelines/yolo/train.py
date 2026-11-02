@@ -1,4 +1,4 @@
-"""YoloPipeline: huấn luyện YOLO qua Ultralytics API kèm đồng bộ biểu đồ trực tiếp lên W&B.
+"""YoloPipeline: huấn luyện YOLO qua Ultralytics API kèm đẩy số liệu realtime lên W&B.
 Phụ trách: Thành viên 1
 """
 from __future__ import annotations
@@ -59,62 +59,11 @@ def _resolve_wandb_api_key() -> str:
     return ""
 
 
-def _generate_training_curves(run_dir: Path) -> Path | None:
-    """Vẽ và lưu biểu đồ đường cong huấn luyện (Loss & Validation mAP) từ results.csv."""
-    results_csv = run_dir / "results.csv"
-    if not results_csv.is_file():
-        return None
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import pandas as pd
-
-        log = pd.read_csv(results_csv)
-        log.columns = [c.strip() for c in log.columns]
-        if log.empty or "epoch" not in log.columns:
-            return None
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-        loss_cols = [
-            c
-            for c in ["train/box_loss", "val/box_loss", "train/cls_loss", "val/cls_loss", "train/dfl_loss", "val/dfl_loss"]
-            if c in log.columns
-        ]
-        if loss_cols:
-            log.plot(x="epoch", y=loss_cols, ax=axes[0], title="Đường cong tổn thất (Loss Curves)")
-            axes[0].set_xlabel("Epoch")
-            axes[0].set_ylabel("Loss")
-            axes[0].grid(True, linestyle="--", alpha=0.6)
-
-        map_cols = [
-            c
-            for c in ["metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/precision(B)", "metrics/recall(B)"]
-            if c in log.columns
-        ]
-        if map_cols:
-            log.plot(x="epoch", y=map_cols, ax=axes[1], title="Chỉ số mAP & Precision/Recall trên tập Validation")
-            axes[1].set_xlabel("Epoch")
-            axes[1].set_ylabel("Score")
-            axes[1].grid(True, linestyle="--", alpha=0.6)
-
-        plt.tight_layout()
-        out_path = run_dir / "training_curves.png"
-        plt.savefig(out_path, dpi=200)
-        plt.close(fig)
-        return out_path
-    except Exception as exc:
-        print(f"[YoloPipeline] Không thể vẽ training_curves.png: {exc}")
-        return None
-
-
 class _RealtimeWandbLogger:
-    """Bộ đồng bộ chỉ số huấn luyện theo thời gian thực (mỗi epoch) và biểu đồ lên Weights & Biases.
+    """Đẩy số liệu (loss, mAP, precision, recall, lr) sau mỗi epoch lên W&B để W&B tự động dựng đồ thị realtime.
 
-    Hoạt động ổn định cả khi chạy 1 GPU (in-process callback) lẫn 2× GPU DDP trên Kaggle
-    (luồng ngầm theo dõi `results.csv` ngay khi mỗi epoch kết thúc).
+    Hoàn toàn tách rời khỏi `model.callbacks` của Ultralytics để không gây lỗi
+    `TypeError: cannot pickle '_thread.lock' object` khi Ultralytics khởi tạo DDP 2 GPU bằng cloudpickle.
     """
 
     def __init__(self, cfg: dict[str, Any], run_name: str, run_dir: Path, outputs_dir: Path) -> None:
@@ -147,8 +96,7 @@ class _RealtimeWandbLogger:
                 wandb.login(key=api_key, relogin=True)
             elif not wandb.api.api_key:
                 print(
-                    "[YoloPipeline][W&B] Cảnh báo: REQUIRE_WANDB=True nhưng chưa tìm thấy WANDB_API_KEY "
-                    "(trong .env, biến môi trường hoặc Kaggle Secrets). Bỏ qua log W&B."
+                    "[YoloPipeline][W&B] Cảnh báo: REQUIRE_WANDB=True nhưng chưa tìm thấy WANDB_API_KEY. Bỏ qua W&B."
                 )
                 return False
 
@@ -173,15 +121,7 @@ class _RealtimeWandbLogger:
                 reinit=True,
             )
             url = getattr(self.run, "url", None)
-            print(f"[YoloPipeline][W&B] Đang vẽ biểu đồ huấn luyện trực tiếp (realtime) tại: {url}")
-
-            # Tắt callback W&B mặc định của Ultralytics để tránh xung đột khi DDP 2 GPU tự sinh tiến trình con
-            try:
-                from ultralytics import settings as ul_settings
-
-                ul_settings.update({"wandb": False})
-            except Exception:
-                pass
+            print(f"[YoloPipeline][W&B] Đang truyền số liệu trực tiếp lên W&B tại: {url}")
 
             self._stop_event.clear()
             self._watcher_thread = threading.Thread(
@@ -200,12 +140,8 @@ class _RealtimeWandbLogger:
         while not self._stop_event.wait(2.0):
             self.sync_from_csv()
 
-    def on_fit_epoch_end(self, trainer: Any) -> None:
-        """Callback gắn trực tiếp vào Ultralytics trainer (cập nhật tức thì sau mỗi epoch)."""
-        self.sync_from_csv()
-
     def sync_from_csv(self) -> None:
-        """Đọc các dòng epoch mới trong results.csv và đẩy ngay lên W&B để vẽ đồ thị trực tiếp."""
+        """Đọc số liệu từng epoch mới trong results.csv và bắn `run.log(...)` để W&B tự vẽ đồ thị."""
         if self.run is None:
             return
         results_csv = self.run_dir / "results.csv"
@@ -235,79 +171,41 @@ class _RealtimeWandbLogger:
                             if col == "epoch":
                                 continue
                             try:
-                                val = float(val_str)
+                                payload[col] = float(val_str)
                             except ValueError:
                                 continue
-                            payload[col] = val
-
-                        # Thêm alias trực quan cho bảng biểu đồ Validation trên W&B
-                        if "metrics/mAP50(B)" in payload:
-                            payload["val/mAP50"] = payload["metrics/mAP50(B)"]
-                        if "metrics/mAP50-95(B)" in payload:
-                            payload["val/mAP50-95"] = payload["metrics/mAP50-95(B)"]
-                        if "metrics/precision(B)" in payload:
-                            payload["val/precision"] = payload["metrics/precision(B)"]
-                        if "metrics/recall(B)" in payload:
-                            payload["val/recall"] = payload["metrics/recall(B)"]
 
                         self.run.log(payload, step=epoch)
                         self._logged_epochs.add(epoch)
             except Exception:
                 pass
 
-    def log_Charts_and_metrics(self, test_metrics: dict[str, Any] | None = None) -> None:
-        """Đẩy toàn bộ ảnh biểu đồ tổng hợp và kết quả đánh giá tập Test lên W&B trước khi đóng."""
+    def log_test_metrics(self, test_metrics: dict[str, Any] | None = None) -> None:
+        """Gửi số liệu đánh giá tập Test cuối cùng lên W&B."""
         if self.run is None:
             return
         self._stop_event.set()
         if self._watcher_thread is not None and self._watcher_thread.is_alive():
             self._watcher_thread.join(timeout=3.0)
 
-        # Đồng bộ lần cuối đảm bảo không sót epoch cuối cùng
         self.sync_from_csv()
 
-        try:
-            import wandb
-
-            chart_files = [
-                ("charts/training_curves", self.run_dir / "training_curves.png"),
-                ("charts/results", self.run_dir / "results.png"),
-                ("charts/confusion_matrix", self.run_dir / "confusion_matrix.png"),
-                ("charts/confusion_matrix_normalized", self.run_dir / "confusion_matrix_normalized.png"),
-                ("charts/PR_curve", self.run_dir / "PR_curve.png"),
-                ("charts/F1_curve", self.run_dir / "F1_curve.png"),
-                ("charts/P_curve", self.run_dir / "P_curve.png"),
-                ("charts/R_curve", self.run_dir / "R_curve.png"),
-                ("charts/labels", self.run_dir / "labels.jpg"),
-                ("val_predictions/batch0", self.run_dir / "val_batch0_pred.jpg"),
-                ("val_predictions/batch1", self.run_dir / "val_batch1_pred.jpg"),
-            ]
-            img_payload: dict[str, Any] = {}
-            for key, path in chart_files:
-                if path.is_file():
-                    img_payload[key] = wandb.Image(str(path), caption=path.name)
-            if img_payload:
-                self.run.log(img_payload)
-
-            if test_metrics:
-                test_payload = {
-                    f"test/{k}": float(v)
-                    for k, v in test_metrics.items()
-                    if isinstance(v, (int, float))
-                }
-                if test_payload:
-                    self.run.log(test_payload)
-                    for k, v in test_payload.items():
-                        self.run.summary[k] = v
-        except Exception as exc:
-            print(f"[YoloPipeline][W&B] Lỗi khi tải biểu đồ cuối khóa lên W&B: {exc}")
+        if test_metrics:
+            test_payload = {
+                f"test/{k}": float(v)
+                for k, v in test_metrics.items()
+                if isinstance(v, (int, float))
+            }
+            if test_payload:
+                self.run.log(test_payload)
+                for k, v in test_payload.items():
+                    self.run.summary[k] = v
 
     def finish(self) -> None:
         self._stop_event.set()
         if self.run is not None:
             try:
                 self.run.finish()
-                print("[YoloPipeline][W&B] Đã hoàn tất đồng bộ dữ liệu và biểu đồ lên W&B.")
             except Exception:
                 pass
             self.run = None
@@ -321,11 +219,11 @@ class YoloPipeline(BasePipeline):
 
         Các bước:
           1. set_seed(cfg["seed"]); run_dir = make_run_dir(outputs_dir, "yolo", cfg["train"]["run_name"], cfg)
-          2. Khởi tạo _RealtimeWandbLogger để vừa chạy vừa vẽ biểu đồ trực tiếp theo từng epoch lên W&B
+          2. Khởi tạo _RealtimeWandbLogger truyền số liệu mỗi epoch lên W&B (độc lập với trainer.callbacks)
           3. model = load_model(cfg["model"]["pretrained"])
           4. model.train(...)
-          5. Vẽ training_curves.png và copy best.pt sang cfg["model"]["weights"]
-          6. Tự động đánh giá tập Test (nếu auto_eval_test=True), đẩy biểu đồ + metrics.json lên W&B
+          5. copy best.pt sang cfg["model"]["weights"]
+          6. Tự động đánh giá tập Test (nếu auto_eval_test=True) và log số liệu Test lên W&B
         Trả về run_dir.
         """
         cfg = self.cfg
@@ -363,18 +261,22 @@ class YoloPipeline(BasePipeline):
         except Exception:
             pass
 
-        # 3. Khởi tạo bộ đồng bộ trực tiếp lên W&B (realtime epoch logger)
-        wb_logger = _RealtimeWandbLogger(cfg, run_name, run_dir, outputs_dir)
-        wb_active = wb_logger.start()
+        # Tắt callback W&B tích hợp sẵn của Ultralytics TRƯỚC khi tạo model
+        # và KHÔNG dùng model.add_callback để tránh cloudpickle lỗi `_thread.lock` khi chạy DDP 2 GPU
+        try:
+            from ultralytics import settings as ul_settings
 
-        # 4. Nạp model ban đầu
+            ul_settings.update({"wandb": False})
+        except Exception:
+            pass
+
+        # 3. Khởi tạo bộ truyền số liệu realtime lên W&B (chạy luồng độc lập theo dõi results.csv)
+        wb_logger = _RealtimeWandbLogger(cfg, run_name, run_dir, outputs_dir)
+        wb_logger.start()
+
+        # 4. Nạp model ban đầu (giữ nguyên callbacks mặc định thuần túy để DDP cloudpickle thành công)
         pretrained = cfg["model"].get("pretrained", "yolo26m.pt")
         model = load_model(pretrained)
-        if wb_active and hasattr(model, "add_callback"):
-            try:
-                model.add_callback("on_fit_epoch_end", wb_logger.on_fit_epoch_end)
-            except Exception:
-                pass
 
         # 5. Tham số huấn luyện Ultralytics
         online_args = build_online_transforms(cfg, "ultralytics")
@@ -406,17 +308,14 @@ class YoloPipeline(BasePipeline):
         try:
             model.train(**train_args)
 
-            # 6. Sinh biểu đồ đường cong huấn luyện (training_curves.png)
-            _generate_training_curves(run_dir)
-
-            # 7. Sao chép best.pt sang đường dẫn weights được chỉ định
+            # 6. Sao chép best.pt sang đường dẫn weights được chỉ định
             best_pt = self.best_checkpoint(run_dir)
             target_weights = resolve_path(cfg["model"]["weights"])
             target_weights.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(best_pt, target_weights)
             print(f"[YoloPipeline] Đã lưu checkpoint tốt nhất sang: {target_weights}")
 
-            # 8. Tự động đánh giá trên tập Test nếu được kích hoạt
+            # 7. Tự động đánh giá trên tập Test nếu được kích hoạt
             test_metrics: dict[str, Any] | None = None
             if cfg.get("eval", {}).get("auto_eval_test", False):
                 try:
@@ -431,8 +330,7 @@ class YoloPipeline(BasePipeline):
                 except Exception:
                     pass
 
-            # 9. Đẩy toàn bộ biểu đồ và chỉ số Test lên W&B
-            wb_logger.log_Charts_and_metrics(test_metrics)
+            wb_logger.log_test_metrics(test_metrics)
         finally:
             wb_logger.finish()
 
