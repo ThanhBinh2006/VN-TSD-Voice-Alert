@@ -176,6 +176,26 @@ def resolve_datasets(
     return normalized
 
 
+def _inject_wandb_env_if_present(nb_path: Path, env: dict[str, str]) -> None:
+    """Chèn biến môi trường W&B từ .env cục bộ vào bản sao notebook tạm thời khi đẩy kernel private."""
+    wandb_keys = ("WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_PROJECT", "WANDB_ENTITY")
+    kv = {k: env[k].strip() for k in wandb_keys if env.get(k, "").strip()}
+    if not kv:
+        return
+    try:
+        nb_data = json.loads(nb_path.read_text(encoding="utf-8"))
+        lines = ["import os\n"] + [
+            f"os.environ.setdefault({json.dumps(k)}, {json.dumps(v)})\n" for k, v in kv.items()
+        ]
+        for cell in nb_data.get("cells", []):
+            if cell.get("cell_type") == "code":
+                cell["source"] = lines + list(cell.get("source", []))
+                break
+        nb_path.write_text(json.dumps(nb_data, indent=1, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def push_kernel(
     pipeline: str = "yolo",
     username: str | None = None,
@@ -217,7 +237,10 @@ def push_kernel(
     # Tạo thư mục tạm thời để đẩy lên Kaggle rồi tự động dọn sạch, không lưu file JSON cố định
     with tempfile.TemporaryDirectory(prefix=f"kaggle_{pipeline}_") as tmp_dir:
         tmp_path = Path(tmp_dir)
-        shutil.copy2(nb_src, tmp_path / nb_src.name)
+        nb_dest = tmp_path / nb_src.name
+        shutil.copy2(nb_src, nb_dest)
+        if is_private:
+            _inject_wandb_env_if_present(nb_dest, env)
         meta_file = tmp_path / "kernel-metadata.json"
         meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
