@@ -7,6 +7,7 @@ import csv
 import json
 import os
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -59,12 +60,67 @@ def _resolve_wandb_api_key() -> str:
     return ""
 
 
-class _RealtimeWandbLogger:
-    """Đẩy số liệu (loss, mAP, precision, recall, lr) sau mỗi epoch lên W&B để W&B tự động dựng đồ thị realtime.
+def _patch_ultralytics_ddp() -> None:
+    """Khắc phục triệt để lỗi `TypeError: cannot pickle '_thread.lock' object` trên Python 3.13.
 
-    Hoàn toàn tách rời khỏi `model.callbacks` của Ultralytics để không gây lỗi
-    `TypeError: cannot pickle '_thread.lock' object` khi Ultralytics khởi tạo DDP 2 GPU bằng cloudpickle.
+    Ultralytics 8.4.x dùng `cloudpickle` trong `generate_ddp_file(trainer)` để đóng gói toàn bộ
+    đối tượng `trainer` khi khởi chạy DDP 2 GPU, gây lỗi với `_thread.lock` trên Python 3.13.
+    Hàm này thay thế `generate_ddp_file` bằng cơ chế sinh script Python thuần từ `vars(trainer.args)`
+    (không dùng cloudpickle).
     """
+    try:
+        import ultralytics.utils.dist as ul_dist
+
+        def _safe_generate_ddp_file(trainer: Any) -> str:
+            module, name = f"{trainer.__class__.__module__}.{trainer.__class__.__name__}".rsplit(".", 1)
+            raw_args = vars(trainer.args) if hasattr(trainer, "args") else {}
+            cfg_dict: dict[str, Any] = {}
+            for k, v in raw_args.items():
+                if isinstance(v, Path):
+                    cfg_dict[k] = v.as_posix()
+                elif isinstance(v, (str, int, float, bool, list, tuple, dict)) or v is None:
+                    cfg_dict[k] = v
+
+            # Đảm bảo model truyền vào trainer con là đường dẫn/tên model hợp lệ
+            if not isinstance(cfg_dict.get("model"), str) and getattr(trainer, "model", None) is not None:
+                cfg_dict["model"] = str(getattr(trainer.args, "model", "yolo26m.pt"))
+
+            content = (
+                "import os\n"
+                'os.environ["WANDB_DISABLED"] = "true"\n'
+                f"from {module} import {name}\n"
+                "if __name__ == '__main__':\n"
+                f"    cfg = {repr(cfg_dict)}\n"
+                f"    trainer = {name}(overrides=cfg)\n"
+                "    trainer.train()\n"
+            )
+            ddp_dir = Path(tempfile.gettempdir()) / "ultralytics_ddp"
+            ddp_dir.mkdir(parents=True, exist_ok=True)
+            file_path = ddp_dir / f"_ddp_trainer_{os.getpid()}_{id(trainer)}.py"
+            file_path.write_text(content, encoding="utf-8")
+            return str(file_path)
+
+        def _safe_ddp_cleanup(trainer: Any, file: str) -> None:
+            try:
+                Path(file).unlink(missing_ok=True)
+                Path(f"{file}.pt").unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        ul_dist.generate_ddp_file = _safe_generate_ddp_file
+        ul_dist.ddp_cleanup = _safe_ddp_cleanup
+        try:
+            import ultralytics.engine.trainer as ul_trainer
+
+            ul_trainer.ddp_cleanup = _safe_ddp_cleanup
+        except Exception:
+            pass
+    except Exception as exc:
+        print(f"[YoloPipeline] Cảnh báo khi patch DDP: {exc}")
+
+
+class _RealtimeWandbLogger:
+    """Đẩy số liệu (loss, mAP, precision, recall, lr) sau mỗi epoch lên W&B để W&B tự động dựng đồ thị realtime."""
 
     def __init__(self, cfg: dict[str, Any], run_name: str, run_dir: Path, outputs_dir: Path) -> None:
         self.cfg = cfg
@@ -215,17 +271,7 @@ class YoloPipeline(BasePipeline):
     name = "yolo"
 
     def fit(self) -> Path:
-        """Fine-tune YOLO trên <processed root>/data.yaml (get_processed_root(cfg)).
-
-        Các bước:
-          1. set_seed(cfg["seed"]); run_dir = make_run_dir(outputs_dir, "yolo", cfg["train"]["run_name"], cfg)
-          2. Khởi tạo _RealtimeWandbLogger truyền số liệu mỗi epoch lên W&B (độc lập với trainer.callbacks)
-          3. model = load_model(cfg["model"]["pretrained"])
-          4. model.train(...)
-          5. copy best.pt sang cfg["model"]["weights"]
-          6. Tự động đánh giá tập Test (nếu auto_eval_test=True) và log số liệu Test lên W&B
-        Trả về run_dir.
-        """
+        """Fine-tune YOLO trên <processed root>/data.yaml (get_processed_root(cfg))."""
         cfg = self.cfg
         set_seed(cfg["seed"])
 
@@ -261,20 +307,20 @@ class YoloPipeline(BasePipeline):
         except Exception:
             pass
 
-        # Tắt callback W&B tích hợp sẵn của Ultralytics TRƯỚC khi tạo model
-        # và KHÔNG dùng model.add_callback để tránh cloudpickle lỗi `_thread.lock` khi chạy DDP 2 GPU
+        # Tắt callback W&B mặc định của Ultralytics và patch generate_ddp_file để không dùng cloudpickle
         try:
             from ultralytics import settings as ul_settings
 
             ul_settings.update({"wandb": False})
         except Exception:
             pass
+        _patch_ultralytics_ddp()
 
         # 3. Khởi tạo bộ truyền số liệu realtime lên W&B (chạy luồng độc lập theo dõi results.csv)
         wb_logger = _RealtimeWandbLogger(cfg, run_name, run_dir, outputs_dir)
         wb_logger.start()
 
-        # 4. Nạp model ban đầu (giữ nguyên callbacks mặc định thuần túy để DDP cloudpickle thành công)
+        # 4. Nạp model ban đầu
         pretrained = cfg["model"].get("pretrained", "yolo26m.pt")
         model = load_model(pretrained)
 
