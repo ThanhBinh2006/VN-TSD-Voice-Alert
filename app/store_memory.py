@@ -1,14 +1,14 @@
 """Nơi lưu log tạm trong RAM cho web khi Repository (SQLite, Thành viên 5) chưa xong.   Phụ trách: Thành viên 3
 
 - Thoả giao diện ResultStore (ts_alert/db/interface.py) -> truyền thẳng vào process_media(repo=...).
-- Có thêm các hàm ĐỌC mà web cần. Đây là ĐỀ XUẤT cho Thành viên 5: Repository nên có đúng các hàm này
-  (cùng tên, cùng kiểu trả về) để web chỉ cần đổi một dòng khi chuyển sang SQLite:
+- Có các hàm ĐỌC mà web cần, cùng tên và tham số với Repository (SQLite) của Thành viên 5,
+  nên web dùng được cả hai mà không phải phân biệt:
 
     get_job(job_id) -> dict | None
         {"id", "input_type", "input_path", "model_name", "status", "created_at", "finished_at",
          "output_path", "unique_sign_count", "voice_play_count",
          "layer_time_ms", "tts_time_ms", "total_time_ms", "error_message"}
-    list_jobs(limit=50) -> list[dict]          # mới nhất trước, cùng khoá như get_job
+    get_jobs(limit=20, offset=0, model_name=None, status=None) -> list[dict]   # mới nhất trước
     get_detections(job_id) -> list[dict]       # {"id", "frame_index", "timestamp_sec", "bbox", "label",
                                                #  "class_id", "confidence", "position"}
     get_voice_events(job_id) -> list[dict]     # {"id", "detection_id", "spoken_text", "timestamp_sec", "audio_path"}
@@ -81,17 +81,20 @@ class InMemoryStore:
         with self._lock:
             self._job(job_id).update(status="failed", error_message=error_message, finished_at=time.time())
 
-    # ------------------------------------------------------------------ đọc (đề xuất cho Thành viên 5)
+    # ------------------------------------------------------------------ đọc (cùng chữ ký với Repository)
 
     def get_job(self, job_id: int) -> dict | None:
         with self._lock:
             job = self._jobs.get(job_id)
             return copy.deepcopy(job) if job else None
 
-    def list_jobs(self, limit: int = 50) -> list[dict]:
+    def get_jobs(self, limit: int = 20, offset: int = 0, model_name: str | None = None,
+                 status: str | None = None) -> list[dict]:
         with self._lock:
-            jobs = sorted(self._jobs.values(), key=lambda j: j["id"], reverse=True)[:limit]
-            return copy.deepcopy(jobs)
+            jobs = [j for j in sorted(self._jobs.values(), key=lambda j: j["id"], reverse=True)
+                    if (model_name is None or j["model_name"] == model_name)
+                    and (status is None or j["status"] == status)]
+            return copy.deepcopy(jobs[offset:offset + limit])
 
     def get_detections(self, job_id: int) -> list[dict]:
         with self._lock:

@@ -124,10 +124,13 @@ class _FakeDeduplicator:
 # ----------------------------------------------------------------------------- cài / gỡ
 
 def is_stub(obj) -> bool:
+    """Hàm còn là vỏ nếu có một DÒNG LỆNH `raise NotImplementedError("TODO...`.
+    Dòng đã bị chú thích (`# raise ...`, như TV5 để lại trong repository.py) không tính."""
     try:
-        return STUB_MARKER in inspect.getsource(obj)
+        source = inspect.getsource(obj)
     except (OSError, TypeError):
         return False
+    return any(line.lstrip().startswith(STUB_MARKER) for line in source.splitlines())
 
 
 def install_fakes():

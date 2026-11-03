@@ -17,7 +17,7 @@ Chạy:
 API (JSON):
     GET  /api/health                              trạng thái server, model, nơi lưu log
     POST /api/jobs            form-data: file, model   -> 202 {"job_id", "status"}
-    GET  /api/jobs                                danh sách job (mới nhất trước)
+    GET  /api/jobs[?limit=50&offset=0]            danh sách job (mới nhất trước)
     GET  /api/jobs/<id>                           chi tiết + số liệu + link kết quả + tiến độ ("progress")
     GET  /api/jobs/<id>/detections                các detection đã ghi
     GET  /api/jobs/<id>/voice-events              các lần phát giọng nói (+ vị trí, link file âm thanh)
@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import logging
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
@@ -95,6 +96,7 @@ def create_app(runtime: str = "local", fake: bool = False, store=None, store_kin
         detector_factory = get_detector
 
     store = store if store is not None else _make_store(store_kind, resolve_path(paths["db_path"]))
+    _fail_unfinished_jobs(store)
     runner = JobRunner(store, cfg_for, detector_factory, outputs_dir, sync=sync)
 
     app = Flask(__name__)
@@ -106,6 +108,15 @@ def create_app(runtime: str = "local", fake: bool = False, store=None, store_kin
 
     _register_routes(app)
     return app
+
+
+def _fail_unfinished_jobs(store) -> None:
+    """SQLite giữ dữ liệu qua các lần chạy: job còn queued/processing lúc khởi động là job bị bỏ dở khi tắt
+    server lần trước (không còn ai chạy tiếp). Đánh dấu lỗi để giao diện không chờ mãi."""
+    for status in ("queued", "processing"):
+        for job in store.get_jobs(limit=1000, status=status):
+            store.fail_job(job["id"], "Server đã tắt khi job đang chạy. Hãy gửi lại file.")
+            log.warning("Job %s bị bỏ dở từ lần chạy trước -> failed", job["id"])
 
 
 # ----------------------------------------------------------------------------- tiện ích
@@ -151,8 +162,22 @@ def _progress_json(job: dict) -> dict:
     return progress
 
 
+def _epoch(value):
+    """Thời điểm -> số giây kể từ 1970 (giao diện cần dạng này). InMemoryStore lưu sẵn dạng số;
+    SQLite (CURRENT_TIMESTAMP) lưu chuỗi "YYYY-MM-DD HH:MM:SS" theo giờ UTC."""
+    if value is None or isinstance(value, (int, float)):
+        return value
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
 def _job_json(job: dict) -> dict:
     data = dict(job)
+    for key in ("created_at", "started_at", "finished_at"):
+        if key in data:
+            data[key] = _epoch(data[key])
     data["progress"] = _progress_json(job)
     data["input_name"] = Path(job["input_path"]).name if job.get("input_path") else None
     if job.get("status") == "done" and job.get("output_path"):
@@ -222,7 +247,9 @@ def _register_routes(app: Flask) -> None:
     @app.get("/api/jobs")
     def list_jobs():
         limit = request.args.get("limit", default=50, type=int)
-        return jsonify([_job_json(j) for j in _ctx()["store"].list_jobs(limit=max(1, min(limit, 500)))])
+        offset = request.args.get("offset", default=0, type=int)
+        jobs = _ctx()["store"].get_jobs(limit=max(1, min(limit, 500)), offset=max(0, offset))
+        return jsonify([_job_json(j) for j in jobs])
 
     @app.get("/api/jobs/<int:job_id>")
     def get_job(job_id: int):
@@ -231,7 +258,11 @@ def _register_routes(app: Flask) -> None:
     @app.get("/api/jobs/<int:job_id>/detections")
     def job_detections(job_id: int):
         _job_or_404(job_id)
-        return jsonify(_ctx()["store"].get_detections(job_id))
+        detections = _ctx()["store"].get_detections(job_id)
+        for det in detections:              # SQLite lưu x1, y1, x2, y2 riêng -> trả thêm "bbox" như DATA_CONTRACT
+            if "bbox" not in det and "x1" in det:
+                det["bbox"] = [det["x1"], det["y1"], det["x2"], det["y2"]]
+        return jsonify(detections)
 
     @app.get("/api/jobs/<int:job_id>/voice-events")
     def job_voice_events(job_id: int):
