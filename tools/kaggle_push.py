@@ -82,6 +82,14 @@ def load_dotenv(env_file: Path | None = None) -> None:
         pass
 
 
+def _kaggle_cmd(*args: str) -> list[str]:
+    """Tìm lệnh kaggle CLI trong PATH hoặc fallback sang python -m kaggle."""
+    exe = shutil.which("kaggle")
+    if exe:
+        return [exe, *args]
+    return [sys.executable, "-m", "kaggle", *args]
+
+
 def resolve_credentials(username: str | None = None, key: str | None = None) -> tuple[str, dict[str, str]]:
     """Lấy username và chuẩn bị biến môi trường thực thi cho Kaggle CLI."""
     load_dotenv()
@@ -249,7 +257,7 @@ def push_kernel(
         print(f"   - GPU      : {enable_gpu} | Internet: {enable_internet} | Private: {is_private}")
 
         res = subprocess.run(
-            [sys.executable, "-m", "kaggle", "kernels", "push", "-p", str(tmp_path)],
+            _kaggle_cmd("kernels", "push", "-p", str(tmp_path)),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -280,7 +288,7 @@ def check_status(
 
     print(f">> [Kaggle Status] Kiểm tra trạng thái kernel: {kernel_id}...")
     res = subprocess.run(
-        [sys.executable, "-m", "kaggle", "kernels", "status", kernel_id],
+        _kaggle_cmd("kernels", "status", kernel_id),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -310,7 +318,7 @@ def pull_output(
 
     print(f">> [Kaggle Pull] Đang tải output từ {kernel_id} về {target_dir}...")
     res = subprocess.run(
-        [sys.executable, "-m", "kaggle", "kernels", "output", kernel_id, "-p", str(target_dir)],
+        _kaggle_cmd("kernels", "output", kernel_id, "-p", str(target_dir)),
         capture_output=True,
         text=True,
         encoding="utf-8",

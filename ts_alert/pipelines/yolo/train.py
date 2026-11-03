@@ -49,7 +49,7 @@ def _resolve_wandb_api_key() -> str:
     if key:
         return key
     try:
-        from kaggle_secrets import UserSecretsClient
+        from kaggle_secrets import UserSecretsClient  # type: ignore[import-not-found]
 
         secret_key = str(UserSecretsClient().get_secret("WANDB_API_KEY") or "").strip()
         if secret_key:
@@ -69,7 +69,7 @@ def _patch_ultralytics_ddp() -> None:
     (không dùng cloudpickle).
     """
     try:
-        import ultralytics.utils.dist as ul_dist
+        import ultralytics.utils.dist as ul_dist  # type: ignore[import-not-found]
 
         def _safe_generate_ddp_file(trainer: Any) -> str:
             module, name = f"{trainer.__class__.__module__}.{trainer.__class__.__name__}".rsplit(".", 1)
@@ -110,7 +110,7 @@ def _patch_ultralytics_ddp() -> None:
         ul_dist.generate_ddp_file = _safe_generate_ddp_file
         ul_dist.ddp_cleanup = _safe_ddp_cleanup
         try:
-            import ultralytics.engine.trainer as ul_trainer
+            import ultralytics.engine.trainer as ul_trainer  # type: ignore[import-not-found]
 
             ul_trainer.ddp_cleanup = _safe_ddp_cleanup
         except Exception:
@@ -146,7 +146,7 @@ class _RealtimeWandbLogger:
             os.environ["WANDB_BASE_URL"] = str(base_url).strip()
 
         try:
-            import wandb
+            import wandb  # type: ignore[import-not-found]
 
             if api_key:
                 wandb.login(key=api_key, relogin=True)
@@ -309,7 +309,7 @@ class YoloPipeline(BasePipeline):
 
         # Tắt callback W&B mặc định của Ultralytics và patch generate_ddp_file để không dùng cloudpickle
         try:
-            from ultralytics import settings as ul_settings
+            from ultralytics import settings as ul_settings  # type: ignore[import-not-found]
 
             ul_settings.update({"wandb": False})
         except Exception:
