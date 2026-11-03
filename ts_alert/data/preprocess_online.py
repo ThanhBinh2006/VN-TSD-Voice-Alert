@@ -5,92 +5,57 @@ Phụ trách: Thành viên 1 (YOLO) + Thành viên 2 (Faster R-CNN)
 from __future__ import annotations
 
 
-def build_online_transforms(cfg: dict, backend: str):
-    """Đọc cfg["online_preprocess"] (letterbox, normalize, hflip, mosaic, mixup, scale, degrees, translate, hsv_*...).
+def _val(op: dict, key: str, default: float) -> float:
+    """Đọc tham số dạng số thực từ op, hỗ trợ boolean (True -> default, False -> 0.0)."""
+    v = op.get(key)
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return default if v else 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
-    - backend == "ultralytics": trả dict tham số train của Ultralytics (mosaic, mixup, fliplr, hsv_*...).
-      Khi enabled=false phải tắt các augmentation mặc định của Ultralytics (mosaic=0, mixup=0, ...).
-    - backend == "torchvision": trả transform cho Dataset của Faster R-CNN (hflip, color_jitter...).
-      mosaic/mixup không có sẵn trong torchvision -> tự cài hoặc bỏ qua và ghi chú trong báo cáo.
+
+def _hsv(op: dict, key: str, default: float) -> float:
+    """Đọc giá trị HSV, ưu tiên key trực tiếp rồi đến cờ color_jitter."""
+    if key in op and op[key] is not None:
+        return float(op[key])
+    return default if op.get("color_jitter", True) else 0.0
+
+
+def build_online_transforms(cfg: dict, backend: str):
+    """Đọc cfg["online_preprocess"] và sinh tham số augment tương ứng.
+
+    - backend == "ultralytics": trả dict tham số train của Ultralytics (tắt toàn bộ khi enabled=false).
+    - backend == "torchvision": trả transform Compose của torchvision cho Faster R-CNN.
     """
     op = cfg.get("online_preprocess", {})
     enabled = bool(op.get("enabled", False))
 
     if backend == "ultralytics":
         if not enabled:
-            # Tắt toàn bộ augmentation mặc định của Ultralytics để so sánh công bằng
-            return {
-                "mosaic": 0.0,
-                "mixup": 0.0,
-                "fliplr": 0.0,
-                "flipud": 0.0,
-                "hsv_h": 0.0,
-                "hsv_s": 0.0,
-                "hsv_v": 0.0,
-                "degrees": 0.0,
-                "translate": 0.0,
-                "scale": 0.0,
-                "shear": 0.0,
-                "perspective": 0.0,
-                "erasing": 0.0,
-                "auto_augment": None,
-            }
-        else:
-            def _parse_val(key: str, default: float) -> float:
-                v = op.get(key)
-                if v is None:
-                    return default
-                if isinstance(v, bool):
-                    return default if v else 0.0
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    return default
+            out = {k: 0.0 for k in (
+                "mosaic", "mixup", "fliplr", "flipud", "hsv_h", "hsv_s",
+                "hsv_v", "degrees", "translate", "scale", "shear", "perspective", "erasing"
+            )}
+            out["auto_augment"] = None
+            return out
 
-            mosaic = _parse_val("mosaic", 1.0)
-            mixup = _parse_val("mixup", 0.15)
-            fliplr = 0.5 if op.get("hflip", False) else 0.0
-
-            # Scale & translate (hỗ trợ jitter cũ làm fallback)
-            jitter = float(op.get("jitter", 0.1))
-            scale = _parse_val("scale", jitter if "jitter" in op else 0.5)
-            translate = _parse_val("translate", jitter if "jitter" in op else 0.1)
-            degrees = _parse_val("degrees", 0.0)
-
-            # HSV parameters
-            if "hsv_h" in op and op["hsv_h"] is not None:
-                hsv_h = float(op["hsv_h"])
-            elif "color_jitter" in op:
-                hsv_h = 0.015 if op["color_jitter"] else 0.0
-            else:
-                hsv_h = 0.015
-
-            if "hsv_s" in op and op["hsv_s"] is not None:
-                hsv_s = float(op["hsv_s"])
-            elif "color_jitter" in op:
-                hsv_s = 0.7 if op["color_jitter"] else 0.0
-            else:
-                hsv_s = 0.7
-
-            if "hsv_v" in op and op["hsv_v"] is not None:
-                hsv_v = float(op["hsv_v"])
-            elif "color_jitter" in op:
-                hsv_v = 0.4 if op["color_jitter"] else 0.0
-            else:
-                hsv_v = 0.4
-
-            return {
-                "mosaic": mosaic,
-                "mixup": mixup,
-                "fliplr": fliplr,
-                "flipud": 0.0,
-                "hsv_h": hsv_h,
-                "hsv_s": hsv_s,
-                "hsv_v": hsv_v,
-                "degrees": degrees,
-                "translate": translate,
-                "scale": scale,
-            }
+        jitter = float(op.get("jitter", 0.1))
+        return {
+            "mosaic": _val(op, "mosaic", 1.0),
+            "mixup": _val(op, "mixup", 0.15),
+            "fliplr": 0.5 if op.get("hflip") else 0.0,
+            "flipud": 0.0,
+            "hsv_h": _hsv(op, "hsv_h", 0.015),
+            "hsv_s": _hsv(op, "hsv_s", 0.7),
+            "hsv_v": _hsv(op, "hsv_v", 0.4),
+            "degrees": _val(op, "degrees", 0.0),
+            "translate": _val(op, "translate", jitter),
+            "scale": _val(op, "scale", float(op.get("jitter", 0.5))),
+        }
 
     if backend == "torchvision":
         from torchvision import transforms
@@ -101,20 +66,11 @@ def build_online_transforms(cfg: dict, backend: str):
         if op.get("hflip"):
             t_list.append(transforms.RandomHorizontalFlip(p=0.5))
 
-        # HSV / ColorJitter
-        hsv_h = float(op.get("hsv_h", 0.015 if op.get("color_jitter") else 0.0))
-        hsv_s = float(op.get("hsv_s", 0.7 if op.get("color_jitter") else 0.0))
-        hsv_v = float(op.get("hsv_v", 0.4 if op.get("color_jitter") else 0.0))
-        if hsv_h > 0 or hsv_s > 0 or hsv_v > 0 or op.get("color_jitter"):
-            hue_val = min(max(hsv_h, 0.0), 0.5)
-            t_list.append(
-                transforms.ColorJitter(
-                    brightness=hsv_v if hsv_v > 0 else 0.2,
-                    contrast=0.2,
-                    saturation=hsv_s if hsv_s > 0 else 0.2,
-                    hue=hue_val if hue_val > 0 else 0.0,
-                )
-            )
+        h, s, v = _hsv(op, "hsv_h", 0.015), _hsv(op, "hsv_s", 0.7), _hsv(op, "hsv_v", 0.4)
+        if h > 0 or s > 0 or v > 0 or op.get("color_jitter"):
+            t_list.append(transforms.ColorJitter(
+                brightness=v or 0.2, contrast=0.2, saturation=s or 0.2, hue=min(h, 0.5)
+            ))
         return transforms.Compose(t_list)
 
     raise ValueError(f"Backend không hợp lệ: {backend!r}. Chọn 'ultralytics' hoặc 'torchvision'.")
