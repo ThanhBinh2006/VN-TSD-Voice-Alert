@@ -32,14 +32,25 @@ def iter_frames(path) -> Iterator[tuple]:
 
 def read_image(path):
     """Đọc ảnh -> ndarray BGR (H, W, 3); raise nếu không đọc được."""
-    # TODO: Thành viên 3
-    raise NotImplementedError("TODO: Thành viên 3")
+    import cv2
+
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Không tìm thấy file ảnh: {p}")
+    img = cv2.imread(str(p))
+    if img is None:
+        raise ValueError(f"Không thể đọc file ảnh: {p}")
+    return img
 
 
 def write_image(path, frame) -> None:
     """Ghi ndarray BGR ra file ảnh (tạo thư mục cha nếu thiếu)."""
-    # TODO: Thành viên 3
-    raise NotImplementedError("TODO: Thành viên 3")
+    import cv2
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(p), frame):
+        raise IOError(f"Không thể ghi ảnh vào: {p}")
 
 
 class VideoWriter:

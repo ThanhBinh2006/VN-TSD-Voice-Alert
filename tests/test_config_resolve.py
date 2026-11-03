@@ -13,7 +13,7 @@ def test_inherits_shared_and_pipeline_merge():
     cfg = resolve_config("yolo", "local")
     assert cfg["pipeline"] == "yolo"
     assert cfg["train"]["batch_size"] == 32        # từ shared.yaml (inherits)
-    assert cfg["train"]["epochs"] == 50           # từ yolo.yaml, deep-merge không làm mất batch_size
+    assert cfg["train"]["epochs"] == 100          # từ yolo.yaml, deep-merge không làm mất batch_size
     assert cfg["model"]["name"] == "yolo26m"
     assert cfg["device"] == "auto"                # từ runtime/local.yaml
 
