@@ -101,6 +101,11 @@ class YoloPipeline(BasePipeline):
             **online_args,
         }
 
+        # Optimization hyperparameters (momentum, weight_decay, warmup_*)
+        for opt_key in ("momentum", "weight_decay", "warmup_epochs", "warmup_momentum", "warmup_bias_lr"):
+            if opt_key in cfg["train"] and cfg["train"][opt_key] is not None:
+                train_args[opt_key] = float(cfg["train"][opt_key])
+
         # Thiết lập thiết bị tính toán (GPU / CPU)
         num_gpus = int(cfg.get("num_gpus", 1))
         if num_gpus == 2:
