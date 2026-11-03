@@ -90,6 +90,20 @@ def _kaggle_cmd(*args: str) -> list[str]:
     return [sys.executable, "-m", "kaggle", *args]
 
 
+def _run_subprocess(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Chạy lệnh subprocess an toàn về bảng mã trên mọi hệ điều hành (tránh UnicodeDecodeError trên Windows)."""
+    env_safe = env.copy()
+    env_safe["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env_safe,
+    )
+
+
 def resolve_credentials(username: str | None = None, key: str | None = None) -> tuple[str, dict[str, str]]:
     """Lấy username và chuẩn bị biến môi trường thực thi cho Kaggle CLI."""
     load_dotenv()
@@ -256,11 +270,8 @@ def push_kernel(
         print(f"   - Datasets : {dataset_sources or '(không gắn)'}")
         print(f"   - GPU      : {enable_gpu} | Internet: {enable_internet} | Private: {is_private}")
 
-        res = subprocess.run(
+        res = _run_subprocess(
             _kaggle_cmd("kernels", "push", "-p", str(tmp_path)),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
             env=env,
         )
 
@@ -287,11 +298,8 @@ def check_status(
     _, kernel_id = resolve_kernel_id(pipeline, resolved_user, kernel_slug)
 
     print(f">> [Kaggle Status] Kiểm tra trạng thái kernel: {kernel_id}...")
-    res = subprocess.run(
+    res = _run_subprocess(
         _kaggle_cmd("kernels", "status", kernel_id),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
         env=env,
     )
     if res.stdout:
@@ -317,11 +325,8 @@ def pull_output(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     print(f">> [Kaggle Pull] Đang tải output từ {kernel_id} về {target_dir}...")
-    res = subprocess.run(
+    res = _run_subprocess(
         _kaggle_cmd("kernels", "output", kernel_id, "-p", str(target_dir)),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
         env=env,
     )
     if res.stdout:
