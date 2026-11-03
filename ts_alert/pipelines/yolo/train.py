@@ -3,8 +3,6 @@ Phụ trách: Thành viên 1
 """
 from __future__ import annotations
 
-import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -18,57 +16,6 @@ from ts_alert.runtime.run_dir import make_run_dir
 from ts_alert.utils.seed import set_seed
 
 
-def _setup_wandb(cfg: dict[str, Any]) -> bool:
-    """Cấu hình Weights & Biases trước khi huấn luyện."""
-    require_wandb = bool(cfg.get("train", {}).get("require_wandb", False))
-
-    if not require_wandb:
-        os.environ["WANDB_DISABLED"] = "true"
-        try:
-            from ultralytics import settings as ul_settings
-
-            ul_settings.update({"wandb": False})
-        except Exception:
-            pass
-        return False
-
-    os.environ.pop("WANDB_DISABLED", None)
-    proj = cfg.get("project") or {}
-    if proj.get("wandb_project"):
-        os.environ["WANDB_PROJECT"] = str(proj["wandb_project"]).strip()
-    if proj.get("wandb_entity"):
-        os.environ["WANDB_ENTITY"] = str(proj["wandb_entity"]).strip()
-    if proj.get("wandb_base_url"):
-        os.environ["WANDB_BASE_URL"] = str(proj["wandb_base_url"]).strip()
-
-    # Nạp API key nếu chưa có trong môi trường
-    if not os.environ.get("WANDB_API_KEY"):
-        try:
-            from kaggle_secrets import UserSecretsClient
-
-            key = str(UserSecretsClient().get_secret("WANDB_API_KEY") or "").strip()
-            if key:
-                os.environ["WANDB_API_KEY"] = key
-        except Exception:
-            pass
-
-    try:
-        import wandb
-
-        api_key = os.environ.get("WANDB_API_KEY")
-        if api_key:
-            wandb.login(key=api_key, relogin=True)
-
-        from ultralytics import settings as ul_settings
-
-        ul_settings.update({"wandb": True})
-        print(f"[YoloPipeline][W&B] Đã bật tích hợp W&B (Project: {os.environ.get('WANDB_PROJECT', 'TSD-Voice-Alert')})")
-        return True
-    except Exception as exc:
-        print(f"[YoloPipeline][W&B] Cảnh báo: không thể bật W&B ({exc}). Huấn luyện tiếp mà không dùng W&B.")
-        return False
-
-
 class YoloPipeline(BasePipeline):
     name = "yolo"
 
@@ -76,11 +23,12 @@ class YoloPipeline(BasePipeline):
         """Fine-tune YOLO trên <processed root>/data.yaml (get_processed_root(cfg)).
 
         1. Tạo thư mục output run_dir
-        2. Sinh runtime data.yaml với đường dẫn tuyệt đối
-        3. Cấu hình W&B (nếu train.require_wandb: true)
+        2. Chuẩn bị runtime data.yaml
+        3. Khởi tạo W&B (nếu train.require_wandb: true)
         4. Nạp model và gọi model.train(...)
         5. Sao chép best.pt sang cfg["model"]["weights"]
-        6. Đánh giá tập Test (nếu eval.auto_eval_test: true) và đồng bộ kết quả lên W&B
+        6. Đánh giá tập Test (nếu eval.auto_eval_test: true)
+        7. Đóng W&B run (wandb.finish())
         """
         cfg = self.cfg
         set_seed(cfg["seed"])
@@ -107,7 +55,6 @@ class YoloPipeline(BasePipeline):
             yaml_data = yaml.safe_load(f)
         yaml_data["path"] = processed_root.resolve().as_posix()
 
-        # Lưu runtime data.yaml tại outputs_dir để tránh bị DDP đa GPU xóa nhầm khi khởi tạo run_dir
         runtime_yaml = outputs_dir / f"data_runtime_{cfg['seed']}.yaml"
         with open(runtime_yaml, "w", encoding="utf-8") as f:
             yaml.dump(yaml_data, f, allow_unicode=True, sort_keys=False)
@@ -117,8 +64,20 @@ class YoloPipeline(BasePipeline):
         except Exception:
             pass
 
-        # 3. Cấu hình Weights & Biases
-        wandb_enabled = _setup_wandb(cfg)
+        # 3. Khởi tạo W&B nếu cấu hình require_wandb: true
+        require_wandb = bool(cfg.get("train", {}).get("require_wandb", False))
+        if require_wandb:
+            try:
+                import wandb
+
+                proj = cfg.get("project") or {}
+                wandb.init(
+                    project=proj.get("wandb_project", "TSD-Voice-Alert"),
+                    name=run_name,
+                    config=cfg,
+                )
+            except Exception as e:
+                print(f"[YoloPipeline][W&B] Cảnh báo khi khởi tạo W&B: {e}")
 
         # 4. Nạp model ban đầu
         pretrained = cfg["model"].get("pretrained", "yolo26m.pt")
@@ -170,25 +129,14 @@ class YoloPipeline(BasePipeline):
             except Exception as e:
                 print(f"[YoloPipeline] Chú ý: Đánh giá tập Test bị bỏ qua: {e}")
 
-        # 8. Đồng bộ kết quả đánh giá Test lên W&B nếu có
-        if wandb_enabled:
+        # 8. Kết thúc W&B run
+        if require_wandb:
             try:
                 import wandb
 
-                if test_metrics is None and (run_dir / "metrics.json").is_file():
-                    test_metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
-
-                if test_metrics and wandb.run is not None:
-                    test_payload = {
-                        f"test/{k}": float(v)
-                        for k, v in test_metrics.items()
-                        if isinstance(v, (int, float))
-                    }
-                    wandb.log(test_payload)
-                    for k, v in test_payload.items():
-                        wandb.run.summary[k] = v
-
                 if wandb.run is not None:
+                    if test_metrics:
+                        wandb.log(test_metrics)
                     wandb.finish()
             except Exception:
                 pass
