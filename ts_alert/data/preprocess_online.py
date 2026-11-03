@@ -100,8 +100,21 @@ def build_online_transforms(cfg: dict, backend: str):
         t_list = []
         if op.get("hflip"):
             t_list.append(transforms.RandomHorizontalFlip(p=0.5))
-        if op.get("color_jitter"):
-            t_list.append(transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2))
+
+        # HSV / ColorJitter
+        hsv_h = float(op.get("hsv_h", 0.015 if op.get("color_jitter") else 0.0))
+        hsv_s = float(op.get("hsv_s", 0.7 if op.get("color_jitter") else 0.0))
+        hsv_v = float(op.get("hsv_v", 0.4 if op.get("color_jitter") else 0.0))
+        if hsv_h > 0 or hsv_s > 0 or hsv_v > 0 or op.get("color_jitter"):
+            hue_val = min(max(hsv_h, 0.0), 0.5)
+            t_list.append(
+                transforms.ColorJitter(
+                    brightness=hsv_v if hsv_v > 0 else 0.2,
+                    contrast=0.2,
+                    saturation=hsv_s if hsv_s > 0 else 0.2,
+                    hue=hue_val if hue_val > 0 else 0.0,
+                )
+            )
         return transforms.Compose(t_list)
 
     raise ValueError(f"Backend không hợp lệ: {backend!r}. Chọn 'ultralytics' hoặc 'torchvision'.")
