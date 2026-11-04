@@ -1,4 +1,4 @@
-# Python 3.11.x. Bộ phiên bản ghim cụ thể (torch 2.9.1 <-> torchvision 0.24.1 là cặp tương thích chính thức)
+# Hỗ trợ Python 3.10 - 3.13. Bộ phiên bản ghim tương thích hoàn toàn:
 torch==2.9.1
 torchvision==0.24.1
 ultralytics==8.4.175        # có YOLO26
@@ -13,5 +13,5 @@ Flask==3.1.3
 gTTS==2.5.4                 # TTS online (cần internet)
 pyttsx3==2.99               # TTS offline
 imageio-ffmpeg==0.6.0       # cung cấp binary ffmpeg để ghép âm thanh vào video
-wandb==0.30.0             # tuỳ chọn: theo dõi thí nghiệm (train.require_wandb)
+wandb==0.26.1               # theo dõi thí nghiệm (tương thích click với gTTS & Flask)
 pytest==9.1.1

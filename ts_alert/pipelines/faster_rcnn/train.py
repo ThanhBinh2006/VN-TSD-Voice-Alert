@@ -122,6 +122,26 @@ def _validate_loss(model, loader, device, amp: bool) -> float:
     return total / max(1, len(loader))
 
 
+def build_optimizer(model, cfg: dict):
+    """Khởi tạo optimizer theo cấu hình train (SGD, Adam, AdamW, momentum, weight_decay)."""
+    import torch
+
+    train_cfg = cfg.get("train", {})
+    lr = float(train_cfg.get("lr", train_cfg.get("lr0", 0.005)))
+    momentum = float(train_cfg.get("momentum", 0.9))
+    weight_decay = float(train_cfg.get("weight_decay", 0.0005))
+    opt_name = str(train_cfg.get("optimizer", "SGD")).lower()
+
+    params = [p for p in model.parameters() if p.requires_grad]
+
+    if opt_name == "adam":
+        return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    elif opt_name == "adamw":
+        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    else:  # sgd or auto
+        return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
+
+
 class FasterRCNNPipeline(BasePipeline):
     name = "faster_rcnn"
 

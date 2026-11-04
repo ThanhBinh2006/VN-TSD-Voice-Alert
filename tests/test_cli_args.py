@@ -1,7 +1,8 @@
+from pathlib import Path
 import argparse
 
 from tools.common import add_common_args, build_overrides
-from ts_alert.config.resolve import get_processed_root, resolve_config
+from ts_alert.config.resolve import get_processed_root, resolve_config, resolve_path
 from ts_alert.utils.io import write_yaml
 
 
@@ -31,7 +32,7 @@ def test_processed_root_fallback_and_override():
     cfg = resolve_config("yolo", "local")
     assert get_processed_root(cfg).name == "processed"
     cfg2 = resolve_config("yolo", "local", {"data": {"root": "/kaggle/input/ds"}})
-    assert str(get_processed_root(cfg2)) == "/kaggle/input/ds"
+    assert get_processed_root(cfg2) == resolve_path("/kaggle/input/ds")
 
 
 def test_shared_keys_present():

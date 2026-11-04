@@ -11,16 +11,27 @@ model:
   weights: models/yolo/best.pt  # checkpoint fine-tune dùng cho web app / suy luận
 
 train:
-  epochs: 50                    # TODO: chỉnh theo thực nghiệm
+  epochs: 100                    # TODO: chỉnh theo thực nghiệm
   lr0: 0.01
-  optimizer: auto
+  optimizer: auto               # auto, SGD, Adam, AdamW
+  # Optimization hyperparameters
+  momentum: 0.937               # Momentum của optimizer (SGD momentum / Adam beta1)
+  weight_decay: 0.0005          # Regularization (L2 weight decay)
+  warmup_epochs: 3.0            # Số epoch warmup
+  warmup_momentum: 0.8          # Momentum trong giai đoạn warmup
+  warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
   enabled: false
   letterbox: true
   normalize: true
-  hflip: false
-  color_jitter: false
-  mosaic: false                 # enabled=false thì phải tắt mosaic/mixup của Ultralytics (mặc định của nó là bật)
-  mixup: false
-  jitter: 0.1
+  hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
+  # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
+  mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation
+  mixup: 0.15                   # Xác suất sử dụng MixUp
+  scale: 0.5                    # Mức độ thay đổi tỷ lệ ảnh (+/- fraction)
+  degrees: 0.0                  # Góc xoay ảnh (+/- deg)
+  translate: 0.1                # Mức độ dịch chuyển ảnh (+/- fraction)
+  hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 1.0)
+  hsv_s: 0.7                    # Biến đổi độ bão hòa Saturation (0.0 - 1.0)
+  hsv_v: 0.4                    # Biến đổi độ sáng Brightness (0.0 - 1.0)

@@ -39,7 +39,7 @@ Huấn luyện chính thức trên **Kaggle (2× GPU T4)**; ứng dụng web ch�
 | gTTS / pyttsx3 | 2.5.4 / 2.99 |
 | imageio-ffmpeg (ffmpeg) | 0.6.0 |
 | PyYAML / pytest | 6.0.3 / 9.1.1 |
-| wandb (tuỳ chọn, theo dõi thí nghiệm) | 0.30.0 |
+| wandb (tuỳ chọn, theo dõi thí nghiệm) | 0.26.1 |
 
 Danh sách ghim đầy đủ: [`requirements.txt`](requirements.txt).
 

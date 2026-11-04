@@ -8,3 +8,7 @@ __pycache__/
 .pytest_cache/
 venv/
 .ipynb_checkpoints/
+.env
+deploy/
+scratch/
+
