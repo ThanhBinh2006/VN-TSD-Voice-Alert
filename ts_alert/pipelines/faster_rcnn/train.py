@@ -209,7 +209,8 @@ class FasterRCNNPipeline(BasePipeline):
             train_ds = _FasterRCNNDataset(processed_root, "train", num_fg, transforms=train_tf)
             val_ds = _FasterRCNNDataset(processed_root, "val", num_fg)
             per_gpu_batch = per_rank_batch(tcfg["batch_size"])  # batch_size là TỔNG trên mọi GPU
-            workers = cfg.get("runtime", {}).get("workers", 2)
+            runtime_cfg = cfg.get("runtime")
+            workers = runtime_cfg.get("workers", 2) if isinstance(runtime_cfg, dict) else int(cfg.get("workers", 2))
 
             train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True) if distributed else None
             train_loader = DataLoader(
@@ -285,7 +286,9 @@ class FasterRCNNPipeline(BasePipeline):
                     gpu_mem = f"{torch.cuda.memory_reserved() / 1e9:.2f}G" if device.type == "cuda" else "CPU"
                     map50_s = f"{val_scores.get('mAP50', 0.0):.4f}" if "mAP50" in val_scores else "N/A"
                     map_s = f"{val_scores.get('mAP50-95', 0.0):.4f}" if "mAP50-95" in val_scores else "N/A"
-                    print(f"{f'{epoch}/{tcfg["epochs"]}':^10} | {gpu_mem:^8} | {train_loss:^10.4f} | {val_loss:^10.4f} | {map50_s:^8} | {map_s:^10} | {cur_lr:^9.6f} | {f'{patience}/{patience_limit}':^8}")
+                    ep_str = f"{epoch}/{tcfg['epochs']}"
+                    pat_str = f"{patience}/{patience_limit}"
+                    print(f"{ep_str:^10} | {gpu_mem:^8} | {train_loss:^10.4f} | {val_loss:^10.4f} | {map50_s:^8} | {map_s:^10} | {cur_lr:^9.6f} | {pat_str:^8}")
 
                     # Payload chuẩn hoá đồng bộ cho cả JSON, CSV và W&B
                     payload = {
