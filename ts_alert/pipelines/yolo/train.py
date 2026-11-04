@@ -93,7 +93,7 @@ class YoloPipeline(BasePipeline):
             "seed": int(cfg["seed"]),
             "patience": int(cfg["train"].get("early_stopping_patience", 10)),
             "amp": bool(cfg["train"].get("amp", True)),
-            "lr0": float(cfg["train"].get("lr0", 0.01)),
+            "lr0": float(cfg["train"].get("lr0", cfg["train"].get("lr", 0.01))),
             "optimizer": cfg["train"].get("optimizer", "auto"),
             "project": run_dir.parent.resolve().as_posix(),
             "name": run_dir.name,

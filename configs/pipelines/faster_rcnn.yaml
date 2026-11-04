@@ -13,8 +13,9 @@ model:
   # DataLoader phải dùng per_rank_batch để tổng batch không bị áp dụng lên MỖI GPU.
 
 train:
-  epochs: 20                    # TODO: chỉnh theo thực nghiệm
+  epochs: 100                    # Thống nhất 100 epochs cho cả hai mô hình
   lr: 0.005
+  lr0: 0.005                   # Hỗ trợ cả lr và lr0
   optimizer: SGD                # SGD, Adam, AdamW
   # Optimization hyperparameters
   momentum: 0.9                 # Momentum của optimizer (SGD momentum / Adam beta1)

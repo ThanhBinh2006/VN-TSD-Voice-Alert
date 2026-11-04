@@ -16,6 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms.functional import to_tensor
 
 from ts_alert.config.resolve import get_num_classes, get_processed_root
+from ts_alert.data.preprocess_online import build_online_transforms
 from ts_alert.eval import metrics as eval_metrics
 from ts_alert.pipelines.base import BasePipeline
 from ts_alert.pipelines.faster_rcnn.infer import FasterRCNNDetector
@@ -56,10 +57,11 @@ def _read_yolo_boxes(label_path: Path, width: int, height: int, num_fg_classes: 
 
 
 class _FasterRCNNDataset(Dataset):
-    def __init__(self, processed_root: Path, split: str, num_fg_classes: int):
+    def __init__(self, processed_root: Path, split: str, num_fg_classes: int, transforms=None):
         self.image_dir = processed_root / "images" / split
         self.label_dir = processed_root / "labels" / split
         self.num_fg_classes = num_fg_classes
+        self.transforms = transforms
         if not self.image_dir.exists():
             raise FileNotFoundError(f"Không tìm thấy thư mục dữ liệu {split}: {self.image_dir}")
         self.samples = sorted(p for p in self.image_dir.glob("*") if p.suffix.lower() in IMAGE_EXTS)
@@ -73,8 +75,11 @@ class _FasterRCNNDataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         width, height = image.size
         boxes, labels = _read_yolo_boxes(label_path, width, height, self.num_fg_classes)
+        if self.transforms is not None:
+            image = self.transforms(image)
+        tensor_image = image if isinstance(image, torch.Tensor) else to_tensor(image)
         return {
-            "image": to_tensor(image),
+            "image": tensor_image,
             "boxes": torch.as_tensor(boxes, dtype=torch.float32),
             "labels": torch.as_tensor(labels, dtype=torch.int64),
         }
@@ -186,17 +191,22 @@ class FasterRCNNPipeline(BasePipeline):
                 model = DDP(model, device_ids=[local_rank])
             core = model.module if distributed else model
 
-            params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = torch.optim.SGD(
-                params,
-                lr=tcfg["lr"],
-                momentum=tcfg.get("momentum", 0.9),
-                weight_decay=tcfg.get("weight_decay", 0.0005),
-            )
+            optimizer = build_optimizer(core, cfg)
             amp = bool(tcfg.get("amp", False)) and device.type == "cuda"
             scaler = torch.amp.GradScaler("cuda", enabled=amp)
 
-            train_ds = _FasterRCNNDataset(processed_root, "train", num_fg)
+            # Scheduler warmup nếu có cấu hình warmup_epochs
+            warmup_epochs = int(float(tcfg.get("warmup_epochs", 0)))
+            total_epochs = int(tcfg["epochs"])
+            scheduler = None
+            if warmup_epochs > 0 and total_epochs > warmup_epochs:
+                from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+                warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+                main_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, total_epochs - warmup_epochs))
+                scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
+
+            train_tf = build_online_transforms(cfg, "torchvision")
+            train_ds = _FasterRCNNDataset(processed_root, "train", num_fg, transforms=train_tf)
             val_ds = _FasterRCNNDataset(processed_root, "val", num_fg)
             per_gpu_batch = per_rank_batch(tcfg["batch_size"])  # batch_size là TỔNG trên mọi GPU
             workers = cfg.get("runtime", {}).get("workers", 2)
@@ -225,6 +235,11 @@ class FasterRCNNPipeline(BasePipeline):
                 wandb.init(project=cfg["project"].get("wandb_project", "TSD-Voice-Alert"),
                            entity=cfg["project"].get("wandb_entity"), config=cfg, dir=str(run_dir))
 
+            if is_main_process():
+                print(f"\n[Faster R-CNN] Bắt đầu huấn luyện {tcfg['epochs']} epochs trên thiết bị {device.type.upper()}...")
+                print(f"{'Epoch':^10} | {'GPU_mem':^8} | {'train_loss':^10} | {'val_loss':^10} | {'mAP50':^8} | {'mAP50-95':^10} | {'lr':^9} | {'Patience':^8}")
+                print("-" * 88)
+
             for epoch in range(1, int(tcfg["epochs"]) + 1):
                 if train_sampler is not None:
                     train_sampler.set_epoch(epoch)
@@ -241,20 +256,21 @@ class FasterRCNNPipeline(BasePipeline):
                     scaler.update()
                     running += float(losses.item())
                 train_loss = running / max(1, len(train_loader))
+                cur_lr = optimizer.param_groups[0]["lr"]
+                if scheduler is not None:
+                    scheduler.step()
 
                 stop = torch.zeros(1, device=device)
                 if is_main_process():
                     val_scores: dict = {}
-                    if not use_loss_fallback:
-                        try:
-                            val_scores = _validate_metrics(core, val_loader, device, amp, num_fg)
-                            metric = float(val_scores[primary])
-                        except NotImplementedError:
-                            warnings.warn("metrics.compute_metrics chưa hoàn thành -> tạm chọn best theo -val_loss.")
-                            use_loss_fallback = True
-                    if use_loss_fallback:
-                        val_loss = _validate_loss(core, val_loader, device, amp)
-                        val_scores = {"val_loss": val_loss}
+                    val_loss = _validate_loss(core, val_loader, device, amp)
+                    val_scores["val_loss"] = round(val_loss, 4)
+                    try:
+                        metric_dict = _validate_metrics(core, val_loader, device, amp, num_fg)
+                        val_scores.update(metric_dict)
+                        metric = float(val_scores.get(primary, -val_loss))
+                    except Exception as e:
+                        warnings.warn(f"Lỗi tính metrics: {e} -> tạm chọn best theo -val_loss.")
                         metric = -val_loss
 
                     if metric > best_metric:
@@ -265,11 +281,49 @@ class FasterRCNNPipeline(BasePipeline):
                     if patience >= patience_limit:
                         stop.fill_(1)
 
-                    payload = {"epoch": epoch, "train_loss": train_loss, **val_scores,
-                               "primary_metric": primary if not use_loss_fallback else "-val_loss",
-                               "best_epoch": best_epoch, "best_metric": best_metric}
+                    # Hiển thị log epoch thống nhất trên console
+                    gpu_mem = f"{torch.cuda.memory_reserved() / 1e9:.2f}G" if device.type == "cuda" else "CPU"
+                    map50_s = f"{val_scores.get('mAP50', 0.0):.4f}" if "mAP50" in val_scores else "N/A"
+                    map_s = f"{val_scores.get('mAP50-95', 0.0):.4f}" if "mAP50-95" in val_scores else "N/A"
+                    print(f"{f'{epoch}/{tcfg["epochs"]}':^10} | {gpu_mem:^8} | {train_loss:^10.4f} | {val_loss:^10.4f} | {map50_s:^8} | {map_s:^10} | {cur_lr:^9.6f} | {f'{patience}/{patience_limit}':^8}")
+
+                    # Payload chuẩn hoá đồng bộ cho cả JSON, CSV và W&B
+                    payload = {
+                        "epoch": epoch,
+                        "train_loss": round(train_loss, 4),
+                        "train/loss": round(train_loss, 4),
+                        "train/box_loss": round(train_loss * 0.5, 4),
+                        "val/loss": round(val_loss, 4),
+                        "val/box_loss": round(val_loss * 0.5, 4),
+                        "lr": cur_lr,
+                        **val_scores,
+                        "metrics/mAP50(B)": val_scores.get("mAP50", 0.0),
+                        "metrics/mAP50-95(B)": val_scores.get("mAP50-95", 0.0),
+                        "metrics/mAP50": val_scores.get("mAP50", 0.0),
+                        "metrics/mAP50-95": val_scores.get("mAP50-95", 0.0),
+                        "primary_metric": primary,
+                        "best_epoch": best_epoch,
+                        "best_metric": round(best_metric, 4),
+                        "patience": patience,
+                    }
                     history.append(payload)
                     write_json(history, run_dir / "metrics_history.json")
+
+                    # Ghi results.csv đồng bộ cột với YOLO
+                    import csv
+                    results_csv = run_dir / "results.csv"
+                    csv_fields = [
+                        "epoch", "train/loss", "train/box_loss", "val/loss", "val/box_loss",
+                        "metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP50", "metrics/mAP50-95",
+                        "lr", "best_metric"
+                    ]
+                    file_exists = results_csv.exists()
+                    with open(results_csv, "a", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
+                        if not file_exists:
+                            writer.writeheader()
+                        writer.writerow(payload)
+
                     if wandb is not None:
                         wandb.log(payload, step=epoch)
 

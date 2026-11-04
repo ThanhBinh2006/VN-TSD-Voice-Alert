@@ -1,6 +1,6 @@
 # Owner: Cả nhóm (Thành viên 1 giữ file này).
 # Cấu hình BẤT BIẾN dùng chung cho cả hai mô hình để so sánh công bằng.
-# Các file trong configs/pipelines/ KHÔNG được ghi đè: seed, data.*, train.batch_size, eval.batch_size, train.primary_metric.
+# Các file trong configs/pipelines/ KHÔNG được ghi đè: seed, data.*, train.batch_size, train.epochs, eval.batch_size, train.primary_metric.
 seed: 42
 
 data:
@@ -16,6 +16,7 @@ train:
   # TỔNG batch trên tất cả GPU. Faster R-CNN (DDP) phải chia bằng ts_alert.runtime.batch.per_rank_batch;
   # YOLO truyền nguyên tổng để Ultralytics tự chia GPU.
   batch_size: 32
+  epochs: 100                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
   early_stopping_patience: 10   # early stopping (epoch)
   amp: true                     # mixed precision
   primary_metric: mAP50-95
