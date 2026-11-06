@@ -11,7 +11,7 @@ def compute_metrics(preds: list, gts: list, num_classes: int) -> dict:
     Trả về đúng các khoá: {"mAP50-95": float, "mAP50": float, "mAP75": float, "AR100": float,
                            "precision": float, "recall": float}
     """
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox",sync_on_compute=False)
 
     preds_fmt = []
     for p_list in preds:
