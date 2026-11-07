@@ -11,8 +11,9 @@ model:
   weights: models/yolo/best.pt  # checkpoint fine-tune dùng cho web app / suy luận
 
 train:
-  epochs: 100                    # TODO: chỉnh theo thực nghiệm
-  lr0: 0.01
+  epochs: 100                    # Thống nhất 100 epochs cho cả hai mô hình
+  lr: 0.01
+  lr0: 0.01                     # Hỗ trợ cả lr và lr0
   optimizer: auto               # auto, SGD, Adam, AdamW
   # Optimization hyperparameters
   momentum: 0.937               # Momentum của optimizer (SGD momentum / Adam beta1)
