@@ -38,6 +38,7 @@ from ts_alert.data.helpers.augmentation import (
     get_safe_crop_bounds,
     transform_and_letterbox_crop,
 )
+from ts_alert.data.helpers.occlusion import augment_occluded_signs_per_class
 from ts_alert.data.helpers.split import split_clusters_for_classes
 from ts_alert.utils.io import load_classes, write_json
 from ts_alert.utils.seed import set_seed
@@ -562,6 +563,21 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
                 aug_per_class[cid] += 1
 
         print(f"[run_preprocess]   Sinh {len(aug_items)} ảnh tăng cường cho {len(aug_per_class)} lớp thiểu số trong Train.")
+
+    # BƯỚC 4B: Tăng cường che khuất một phần (góc, cạnh) cho tập Train (30 box/lớp)
+    occlusion_cfg = cfg.get("data", {}).get("occlusion_aug", {})
+    if occlusion_cfg.get("enabled", True) and "train" in splits:
+        target_boxes = int(occlusion_cfg.get("boxes_per_class", 30))
+        print(f"[run_preprocess] BƯỚC 4B: Tạo tăng cường che khuất một phần góc/cạnh ({target_boxes} box/lớp) cho tập Train...")
+        occ_items = augment_occluded_signs_per_class(
+            train_samples=splits["train"],
+            target_boxes_per_class=target_boxes,
+            target_size=(img_size, img_size),
+            pad_value=pad_val,
+            seed=cfg["seed"],
+        )
+        aug_items.extend(occ_items)
+        print(f"[run_preprocess]   Đã sinh thêm {len(occ_items)} ảnh ghép chứa các box biển báo bị che khuất.")
 
     # BƯỚC 5: Letterbox và xuất ra out_dir
     print(f"[run_preprocess] BƯỚC 5: Letterbox 640x640 cho toàn bộ split...")
