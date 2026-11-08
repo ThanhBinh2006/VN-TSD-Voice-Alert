@@ -48,6 +48,7 @@ def analyze_raw_dataset(
     min_box_px: int = 8,
     num_samples: int = 9,
     quality_samples: int = 1000,
+    blur_threshold: float = 50.0,
     dhash_size: int = 32,
     dhash_hamming: int = 380,
     seed: int = 42,
@@ -112,7 +113,7 @@ def analyze_raw_dataset(
     # 07. Brightness & Sharpness
     print(f"\n[EDA Raw] 07 Brightness & Sharpness (mẫu {min(quality_samples, len(img_paths))} ảnh)...")
     summary_meta["quality"] = analyze_and_plot_brightness_sharpness_raw(
-        img_paths, target_dir, max_samples=quality_samples, fig_num=7
+        img_paths, target_dir, max_samples=quality_samples, blur_threshold=blur_threshold, fig_num=7
     )
 
     # 08. Demo n ảnh mẫu

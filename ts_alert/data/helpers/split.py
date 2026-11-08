@@ -63,6 +63,8 @@ def split_clusters_for_classes(
     img_paths: list[Path],
     ratio: tuple[float, float, float] = (0.70, 0.15, 0.15),
     seed: int = 42,
+    blur_threshold: float = 50.0,
+    dark_threshold: float = 85.0,
 ) -> dict[str, list[str]]:
     """Phân bổ cụm vào Train/Val/Test (Train đủ 52 lớp, cô lập cụm 100%)."""
     total_images = len(img_paths)
@@ -78,7 +80,7 @@ def split_clusters_for_classes(
         res = calculate_brightness_sharpness(p)
         if res is not None:
             b, s_val = res
-            stem_quality[s] = {"dark": b < 85, "blur": s_val < 100}
+            stem_quality[s] = {"dark": b < dark_threshold, "blur": s_val < blur_threshold}
         else:
             stem_quality[s] = {"dark": False, "blur": False}
 
@@ -225,6 +227,8 @@ def split_by_dhash_clusters(
     min_box_px: int = 8,
     image_size: tuple[int, int] = (640, 640),
     seed: int = 42,
+    blur_threshold: float = 50.0,
+    dark_threshold: float = 85.0,
 ) -> dict[str, list[str]]:
     """Gom cụm dHash thuần túy và phân chia split."""
     if not img_paths:
@@ -253,4 +257,6 @@ def split_by_dhash_clusters(
         img_paths=img_paths,
         ratio=ratio,
         seed=seed,
+        blur_threshold=blur_threshold,
+        dark_threshold=dark_threshold,
     )

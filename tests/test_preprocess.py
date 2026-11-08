@@ -99,3 +99,37 @@ def test_write_data_yaml(tmp_path: Path):
     assert "nc: 3" in content
     assert "bien_1" in content
     assert "images/train" in content
+
+
+def test_split_samples_custom_quality_thresholds(tmp_path: Path):
+    """Kiểm tra split_samples hỗ trợ truyền tuỳ biến blur_threshold và dark_threshold."""
+    raw_dir = tmp_path / "raw"
+    (raw_dir / "images").mkdir(parents=True)
+    (raw_dir / "labels").mkdir(parents=True)
+
+    samples = []
+    for i in range(15):
+        stem = f"sample_{i:03d}"
+        img_p = raw_dir / "images" / f"{stem}.jpg"
+        lbl_p = raw_dir / "labels" / f"{stem}.txt"
+        img = np.random.randint(50, 200, (120, 120, 3), dtype=np.uint8)
+        if i % 3 == 0:
+            # Ảnh mờ (blur nhẹ)
+            img = cv2.GaussianBlur(img, (9, 9), 3.0)
+        cv2.imwrite(str(img_p), img)
+        with open(lbl_p, "w", encoding="utf-8") as f:
+            f.write(f"{i % 2} 0.5 0.5 0.3 0.3\n")
+        samples.append({"image": img_p, "label": lbl_p, "stem": stem})
+
+    splits = split_samples(
+        samples,
+        ratios={"train": 0.6, "val": 0.2, "test": 0.2},
+        seed=42,
+        blur_threshold=50.0,
+        dark_threshold=85.0,
+    )
+    assert len(splits["train"]) > 0
+    assert len(splits["val"]) > 0
+    assert len(splits["test"]) > 0
+    assert sum(len(v) for v in splits.values()) == len(samples)
+

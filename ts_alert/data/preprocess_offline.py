@@ -176,6 +176,8 @@ def split_samples(
     hamming_thresh: int = 380,
     min_box_px: int = 8,
     image_size: int = 640,
+    blur_threshold: float = 50.0,
+    dark_threshold: float = 85.0,
 ) -> dict[str, list[dict]]:
     """Chia {"train": [...], "val": [...], "test": [...]} theo ratios, gom cụm dHash độc lập 100%
     và bảo đảm tập train chứa toàn bộ các lớp xuất hiện trong dataset."""
@@ -220,6 +222,8 @@ def split_samples(
         img_paths=img_paths,
         ratio=ratio_tuple,
         seed=seed,
+        blur_threshold=blur_threshold,
+        dark_threshold=dark_threshold,
     )
 
     return {
@@ -443,11 +447,14 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
     img_size = int(data.get("image_size", 640))
     pad_val = int(data.get("pad_value", 114))
     min_box_px = int(cfg.get("preprocess", {}).get("min_box_px", 8))
+    blur_threshold = float(data.get("blur_threshold", cfg.get("preprocess", {}).get("blur_threshold", 50.0)))
+    dark_threshold = float(data.get("dark_threshold", cfg.get("preprocess", {}).get("dark_threshold", 85.0)))
     hash_size = int(cfg.get("split", {}).get("hash_size", 32))
     hamming_thresh = int(cfg.get("split", {}).get("hamming_threshold", 380))
     augment_minority = True
 
     print(f"[run_preprocess] Bắt đầu tiền xử lý: raw_dir={raw_dir}, out_dir={out_dir}")
+    print(f"[run_preprocess]   Cấu hình chất lượng ảnh: blur_threshold={blur_threshold}, dark_threshold={dark_threshold}")
     t0 = time.time()
 
     # Quét dữ liệu thô
@@ -470,6 +477,8 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
         hamming_thresh=hamming_thresh,
         min_box_px=min_box_px,
         image_size=img_size,
+        blur_threshold=blur_threshold,
+        dark_threshold=dark_threshold,
     )
 
     # BƯỚC 4: Augment lớp thiểu số trong tập train
@@ -622,6 +631,8 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
         "image_size": img_size,
         "seed": cfg["seed"],
         "num_classes": num_classes,
+        "blur_threshold": blur_threshold,
+        "dark_threshold": dark_threshold,
         "counts": {s: consolidation_res["split_stats"][s]["n_images"] for s in ("train", "val", "test")},
         "box_counts": {s: consolidation_res["split_stats"][s]["n_boxes_out"] for s in ("train", "val", "test")},
         "total_images_in": len(samples),
