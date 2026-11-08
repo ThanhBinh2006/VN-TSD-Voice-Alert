@@ -127,3 +127,37 @@ def test_augment_occluded_signs_per_class(tmp_path):
     assert class_box_counts[0] == target_per_class, f"Class 0 phải đủ {target_per_class} box, thực tế: {class_box_counts[0]}"
     assert class_box_counts[1] == target_per_class, f"Class 1 phải đủ {target_per_class} box, thực tế: {class_box_counts[1]}"
 
+
+def test_augment_occluded_signs_with_clean_boxes(tmp_path):
+    """Kiểm tra augment_occluded_signs_per_class với train_samples chuẩn pipeline (không chứa key 'boxes')."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    p1 = img_dir / "img1.jpg"
+    p2 = img_dir / "img2.jpg"
+    im = np.full((300, 300, 3), 100, dtype=np.uint8)
+    cv2.imwrite(str(p1), im)
+    cv2.imwrite(str(p2), im)
+
+    train_samples = [
+        {"image": p1, "label": None, "stem": "img1"},
+        {"image": p2, "label": None, "stem": "img2"},
+    ]
+    clean_boxes = {
+        "img1": [(0, 0.4, 0.4, 0.2, 0.2)],
+        "img2": [(1, 0.5, 0.5, 0.25, 0.25)],
+    }
+
+    results = augment_occluded_signs_per_class(
+        train_samples=train_samples,
+        target_boxes_per_class=4,
+        clean_boxes=clean_boxes,
+        seed=42,
+    )
+    counts = {0: 0, 1: 0}
+    for stem, canvas, boxes in results:
+        for b in boxes:
+            counts[b[0]] += 1
+    assert counts[0] == 4
+    assert counts[1] == 4
+
+

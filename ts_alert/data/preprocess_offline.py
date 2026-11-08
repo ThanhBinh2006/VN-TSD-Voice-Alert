@@ -584,6 +584,7 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
             target_size=(img_size, img_size),
             pad_value=pad_val,
             seed=cfg["seed"],
+            clean_boxes=clean_boxes,
         )
         aug_items.extend(occ_items)
         print(f"[run_preprocess]   Đã sinh thêm {len(occ_items)} ảnh ghép chứa các box biển báo bị che khuất.")

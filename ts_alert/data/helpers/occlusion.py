@@ -255,6 +255,7 @@ def augment_occluded_signs_per_class(
     target_size: tuple[int, int] = (640, 640),
     pad_value: int = 114,
     seed: int = 42,
+    clean_boxes: dict[str, list[tuple[int, float, float, float, float]]] | None = None,
 ) -> list[tuple[str, np.ndarray, list[tuple[int, float, float, float, float]]]]:
     """Sinh đúng `target_boxes_per_class` box biển báo bị che khuất (ở góc/cạnh) cho mỗi class trong tập Train.
     
@@ -267,9 +268,40 @@ def augment_occluded_signs_per_class(
     class_candidates: dict[int, list[tuple[Any, tuple[int, float, float, float, float]]]] = defaultdict(list)
     for s in train_samples:
         img_path = s["image"]
-        for b in s.get("boxes", []):
+        stem = s.get("stem") or Path(img_path).stem
+
+        boxes: list[tuple[int, float, float, float, float]] = []
+        if "boxes" in s and s["boxes"]:
+            boxes = s["boxes"]
+        elif clean_boxes is not None and stem in clean_boxes:
+            boxes = clean_boxes[stem]
+        elif s.get("label") and Path(s["label"]).exists():
+            lbl_p = Path(s["label"])
+            try:
+                with open(lbl_p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            boxes.append((int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])))
+            except Exception:
+                pass
+
+        for b in boxes:
             cid = int(b[0])
             class_candidates[cid].append((img_path, b))
+
+    # Safety fallback: nếu clean_boxes có thêm candidate cho các class chưa xuất hiện trong train_samples
+    if clean_boxes is not None:
+        all_train_cids = set(class_candidates.keys())
+        all_cids_in_clean = {b[0] for b_list in clean_boxes.values() for b in b_list}
+        missing_cids = all_cids_in_clean - all_train_cids
+        if missing_cids:
+            stem_to_img = {s.get("stem") or Path(s["image"]).stem: s["image"] for s in train_samples}
+            for st, b_list in clean_boxes.items():
+                for b in b_list:
+                    cid = int(b[0])
+                    if cid in missing_cids and st in stem_to_img:
+                        class_candidates[cid].append((stem_to_img[st], b))
 
     if not class_candidates:
         return []
