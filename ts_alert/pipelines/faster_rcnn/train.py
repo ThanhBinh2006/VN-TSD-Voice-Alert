@@ -16,7 +16,11 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms.functional import to_tensor
 
 from ts_alert.config.resolve import get_num_classes, get_processed_root
-from ts_alert.data.preprocess_online import build_online_transforms
+from ts_alert.data.preprocess_online import (
+    apply_partial_occlusion_to_boxes,
+    build_online_transforms,
+    get_online_occlusion_config,
+)
 from ts_alert.eval import metrics as eval_metrics
 from ts_alert.pipelines.base import BasePipeline
 from ts_alert.pipelines.faster_rcnn.infer import FasterRCNNDetector
@@ -57,24 +61,51 @@ def _read_yolo_boxes(label_path: Path, width: int, height: int, num_fg_classes: 
 
 
 class _FasterRCNNDataset(Dataset):
-    def __init__(self, processed_root: Path, split: str, num_fg_classes: int, transforms=None):
+    """Đọc ảnh và nhãn YOLO, hỗ trợ che khuất theo bounding box trước transform."""
+
+    def __init__(
+        self,
+        processed_root: Path,
+        split: str,
+        num_fg_classes: int,
+        transforms=None,
+        occlusion_cfg: dict | None = None,
+    ) -> None:
+        """Khởi tạo dataset; mặc định không áp dụng che khuất."""
         self.image_dir = processed_root / "images" / split
         self.label_dir = processed_root / "labels" / split
         self.num_fg_classes = num_fg_classes
         self.transforms = transforms
+        occ = occlusion_cfg or {}
+        self.occlusion_p = float(occ.get("p", 0.0)) if occ.get("enabled", True) else 0.0
+        self.occlusion_ratio = float(occ.get("ratio", 0.30))
         if not self.image_dir.exists():
             raise FileNotFoundError(f"Không tìm thấy thư mục dữ liệu {split}: {self.image_dir}")
         self.samples = sorted(p for p in self.image_dir.glob("*") if p.suffix.lower() in IMAGE_EXTS)
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Trả về số ảnh trong split."""
         return len(self.samples)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        """Đọc mẫu, áp dụng che khuất nếu bật và giữ nguyên boxes, labels."""
         image_path = self.samples[index]
         label_path = self.label_dir / f"{image_path.stem}.txt"
         image = Image.open(image_path).convert("RGB")
         width, height = image.size
         boxes, labels = _read_yolo_boxes(label_path, width, height, self.num_fg_classes)
+
+        if self.occlusion_p > 0.0 and len(boxes) > 0:
+            img_np = np.asarray(image)
+            occluded_np = apply_partial_occlusion_to_boxes(
+                img_np,
+                boxes,
+                occlusion_p=self.occlusion_p,
+                occlusion_ratio=self.occlusion_ratio,
+            )
+            if occluded_np is not img_np:
+                image = Image.fromarray(occluded_np)
+
         if self.transforms is not None:
             image = self.transforms(image)
         tensor_image = image if isinstance(image, torch.Tensor) else to_tensor(image)
@@ -206,8 +237,20 @@ class FasterRCNNPipeline(BasePipeline):
                 scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
 
             train_tf = build_online_transforms(cfg, "torchvision")
-            train_ds = _FasterRCNNDataset(processed_root, "train", num_fg, transforms=train_tf)
+            occ_cfg = get_online_occlusion_config(cfg)
+            train_ds = _FasterRCNNDataset(
+                processed_root,
+                "train",
+                num_fg,
+                transforms=train_tf,
+                occlusion_cfg=occ_cfg,
+            )
             val_ds = _FasterRCNNDataset(processed_root, "val", num_fg)
+            if is_main_process() and occ_cfg["enabled"] and occ_cfg["p"] > 0.0:
+                print(
+                    f"[Faster R-CNN] Bật online occlusion: "
+                    f"p={occ_cfg['p']}, ratio={occ_cfg['ratio']}"
+                )
             per_gpu_batch = per_rank_batch(tcfg["batch_size"])  # batch_size là TỔNG trên mọi GPU
             runtime_cfg = cfg.get("runtime")
             workers = runtime_cfg.get("workers", 2) if isinstance(runtime_cfg, dict) else int(cfg.get("workers", 2))

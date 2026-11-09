@@ -38,3 +38,5 @@ online_preprocess:
   hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 1.0)
   hsv_s: 0.7                    # Biến đổi độ bão hòa Saturation (0.0 - 1.0)
   hsv_v: 0.4                    # Biến đổi độ sáng Brightness (0.0 - 1.0)
+  occlusion_p: 0.30             # Xác suất áp dụng che khuất một phần góc/cạnh trên mỗi ảnh khi train (0.0 = tắt)
+  occlusion_ratio: 0.30         # Tỉ lệ độ bị che phủ theo góc/cạnh của từng box (0.05 - 0.90)

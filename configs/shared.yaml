@@ -11,12 +11,8 @@ data:
   split: {train: 0.7, val: 0.15, test: 0.15}   # TODO: nhóm chốt tỉ lệ
   num_classes: null             # TODO: số lớp biển báo của dataset. Để null thì đếm từ configs/classes.csv.
                                 # Faster R-CNN: box predictor = num_classes + 1 (thêm background).
-  blur_threshold: 50.0          # Ngưỡng Laplacian variance xác định ảnh mờ (hạ từ 100 xuống 50 để tránh gán nhầm ảnh đường sá bình thường)
+  blur_threshold: 20.0          # Ngưỡng Laplacian variance xác định ảnh mờ (hạ từ 100 xuống 50 để tránh gán nhầm ảnh đường sá bình thường)
   dark_threshold: 85.0          # Ngưỡng Grayscale mean xác định ảnh tối
-  occlusion_aug:
-    enabled: true               # Tăng cường che khuất một phần (góc, cạnh)
-    boxes_per_class: 30         # 30 box che khuất cho mỗi class trong tập train
-    pair_crops: true            # Ghép 2 box vào cùng 1 canvas 640x640
 
 train:
   # TỔNG batch trên tất cả GPU. Faster R-CNN (DDP) phải chia bằng ts_alert.runtime.batch.per_rank_batch;
