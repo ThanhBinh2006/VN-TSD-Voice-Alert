@@ -26,7 +26,7 @@ train:
   require_wandb: false          # true = bắt buộc log lên W&B (khi đó phải điền mục project bên dưới)
 
 eval:
-  batch_size: 16                # TỔNG trên mọi GPU, hai pipeline phải giống nhau
+  batch_size: 32                # TỔNG trên mọi GPU, hai pipeline phải giống nhau
   split: test
   auto_eval_test: true          # true = fit() tự đánh giá tập Test sau khi huấn luyện xong
   metrics: [mAP50-95, mAP50, mAP75, AR100]

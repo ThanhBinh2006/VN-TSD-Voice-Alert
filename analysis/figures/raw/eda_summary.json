@@ -3617,6 +3617,6 @@
     "samples_analyzed": 1000,
     "mean_brightness": 121.13,
     "median_sharpness": 441.69,
-    "blur_pct": 1.1
+    "blur_pct": 0.4
   }
 }
