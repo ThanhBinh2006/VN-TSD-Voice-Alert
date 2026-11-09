@@ -646,3 +646,47 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
     write_json(meta, out_dir / "meta.json")
     print(f"[run_preprocess] Hoàn thành tiền xử lý trong {meta['elapsed_seconds']}s -> {out_dir}")
     return meta
+
+
+def main(argv=None) -> None:
+    """Chạy tiền xử lý offline trực tiếp qua CLI (`python -m ts_alert.data.preprocess_offline`)."""
+    import argparse
+
+    from ts_alert.config.resolve import (
+        _load_with_inherits,
+        _runtime_path,
+        deep_merge,
+        parse_overrides,
+        resolve_config,
+    )
+    from ts_alert.utils.io import read_yaml
+
+    parser = argparse.ArgumentParser(description="Tiền xử lý dữ liệu offline (TSD-Voice-Alert).")
+    parser.add_argument("--config", type=Path, default=None, help="Đường dẫn file YAML cấu hình (vd: configs/shared.yaml)")
+    parser.add_argument("--data-root", default=None, help="Thư mục dữ liệu gốc (mặc định paths.raw_dir)")
+    parser.add_argument("--runtime", default="local", help="Runtime preset trong configs/runtime/ (default: local)")
+    parser.add_argument("--set", nargs="*", default=[], help="Ghi đè cấu hình, vd. data.image_size=640")
+    args = parser.parse_args(argv)
+
+    overrides = parse_overrides(args.set)
+    if args.config is not None:
+        cfg_path = resolve_path(args.config)
+        cfg = _load_with_inherits(cfg_path)
+        if args.runtime:
+            cfg = deep_merge(cfg, read_yaml(_runtime_path(args.runtime)))
+        cfg = deep_merge(cfg, overrides)
+    else:
+        cfg = resolve_config(None, args.runtime, overrides)
+
+    print(
+        json.dumps(
+            run_preprocess(cfg, args.data_root),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
+
