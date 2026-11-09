@@ -11,7 +11,7 @@ data:
   split: {train: 0.7, val: 0.15, test: 0.15}   # TODO: nhóm chốt tỉ lệ
   num_classes: null             # TODO: số lớp biển báo của dataset. Để null thì đếm từ configs/classes.csv.
                                 # Faster R-CNN: box predictor = num_classes + 1 (thêm background).
-  blur_threshold: 20.0          # Ngưỡng Laplacian variance xác định ảnh mờ (hạ từ 100 xuống 50 để tránh gán nhầm ảnh đường sá bình thường)
+  blur_threshold: 10.0          # Ngưỡng Laplacian variance xác định ảnh mờ (hạ từ 100 xuống 50 để tránh gán nhầm ảnh đường sá bình thường)
   dark_threshold: 85.0          # Ngưỡng Grayscale mean xác định ảnh tối
 
 train:

@@ -35,7 +35,7 @@ def test_offline_config_restored_and_online_defaults():
     """Offline config không còn occlusion_aug (giữ blur_threshold=20); online tắt mặc định."""
     shared_cfg = resolve_config(None, "local")
     assert "occlusion_aug" not in shared_cfg["data"]
-    assert shared_cfg["data"]["blur_threshold"] == 20.0
+    assert shared_cfg["data"]["blur_threshold"] == 10.0
 
     for pipeline in ("yolo", "faster_rcnn"):
         cfg = resolve_config(pipeline, "local")
