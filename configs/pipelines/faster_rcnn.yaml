@@ -32,27 +32,27 @@ online_preprocess:
 
 sweep:                          # Không gian tìm kiếm siêu tham số (tuân thủ không ghi đè shared.yaml)
   parameters:
-    train.lr:
-      distribution: log_uniform_values
-      min: 0.001
-      max: 0.01
+    # train.lr:
+    #   distribution: log_uniform_values
+    #   min: 0.001
+    #   max: 0.01
     train.optimizer:
-      values: [SGD, AdamW]
-    train.momentum:
-      distribution: uniform
-      min: 0.9
-      max: 0.937
-    train.weight_decay:
-      distribution: log_uniform_values
-      min: 0.0001
-      max: 0.001
-    train.warmup_epochs:
-      distribution: uniform
-      min: 1.0
-      max: 5.0
-    online_preprocess.enabled:
-      values: [false, true]
-    online_preprocess.occlusion_p:
-      values: [0.0, 0.3, 0.5]
-    online_preprocess.occlusion_ratio:
-      values: [0.2, 0.3, 0.45]
+      values: [SGD, AdamW, auto]
+    # train.momentum:
+    #   distribution: uniform
+    #   min: 0.9
+    #   max: 0.937
+    # train.weight_decay:
+    #   distribution: log_uniform_values
+    #   min: 0.0001
+    #   max: 0.001
+    # train.warmup_epochs:
+    #   distribution: uniform
+    #   min: 1.0
+    #   max: 5.0
+    # online_preprocess.enabled:
+    #   values: [false, true]
+    # online_preprocess.occlusion_p:
+    #   values: [0.0, 0.3, 0.5]
+    # online_preprocess.occlusion_ratio:
+    #   values: [0.2, 0.3, 0.45]
