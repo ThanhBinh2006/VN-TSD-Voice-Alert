@@ -22,56 +22,66 @@ _OCCLUDER_COLORS: tuple[tuple[int, int, int], ...] = (
 )
 
 
-def _val(op: dict, key: str, default: float) -> float:
-    """Đọc tham số dạng số thực từ op, hỗ trợ boolean (True -> default, False -> 0.0)."""
-    v = op.get(key)
-    if v is None:
+def _val(op: dict[str, Any], key: str, default: float) -> float:
+    """Đọc tham số số thực, hỗ trợ boolean (True -> default, False -> 0.0)."""
+    value = op.get(key)
+    if value is None:
         return default
-    if isinstance(v, bool):
-        return default if v else 0.0
+    if isinstance(value, bool):
+        return default if value else 0.0
     try:
-        return float(v)
+        return float(value)
     except (TypeError, ValueError):
         return default
 
 
-def _hsv(op: dict, key: str, default: float) -> float:
-    """Đọc giá trị HSV, ưu tiên key trực tiếp rồi đến cờ color_jitter."""
-    if key in op and op[key] is not None:
-        return float(op[key])
-    return default if op.get("color_jitter", True) else 0.0
+def build_online_transforms(cfg: dict[str, Any], backend: str) -> Any:
+    """Đọc cấu hình online_preprocess và sinh tham số augment theo backend.
 
+    Backend ``ultralytics`` trả dict tham số train; khi tắt, mọi tham số
+    augment bằng 0.0 và auto_augment bằng None.
+    Backend ``torchvision`` trả transform Compose cho Faster R-CNN.
 
-def build_online_transforms(cfg: dict, backend: str):
-    """Đọc cfg["online_preprocess"] và sinh tham số augment tương ứng.
-
-    - backend == "ultralytics": trả dict tham số train của Ultralytics (tắt toàn bộ khi enabled=false).
-    - backend == "torchvision": trả transform Compose của torchvision cho Faster R-CNN.
+    Raises:
+        ValueError: Backend không được hỗ trợ.
     """
     op = cfg.get("online_preprocess", {})
     enabled = bool(op.get("enabled", False))
 
     if backend == "ultralytics":
         if not enabled:
-            out = {k: 0.0 for k in (
-                "mosaic", "mixup", "fliplr", "flipud", "hsv_h", "hsv_s",
-                "hsv_v", "degrees", "translate", "scale", "shear", "perspective", "erasing"
-            )}
+            out: dict[str, Any] = {
+                key: 0.0
+                for key in (
+                    "mosaic",
+                    "mixup",
+                    "fliplr",
+                    "flipud",
+                    "hsv_h",
+                    "hsv_s",
+                    "hsv_v",
+                    "degrees",
+                    "translate",
+                    "scale",
+                    "shear",
+                    "perspective",
+                    "erasing",
+                )
+            }
             out["auto_augment"] = None
             return out
 
-        jitter = float(op.get("jitter", 0.1))
         return {
             "mosaic": _val(op, "mosaic", 1.0),
             "mixup": _val(op, "mixup", 0.15),
             "fliplr": 0.5 if op.get("hflip") else 0.0,
             "flipud": 0.0,
-            "hsv_h": _hsv(op, "hsv_h", 0.015),
-            "hsv_s": _hsv(op, "hsv_s", 0.7),
-            "hsv_v": _hsv(op, "hsv_v", 0.4),
+            "hsv_h": _val(op, "hsv_h", 0.015),
+            "hsv_s": _val(op, "hsv_s", 0.7),
+            "hsv_v": _val(op, "hsv_v", 0.4),
             "degrees": _val(op, "degrees", 0.0),
-            "translate": _val(op, "translate", jitter),
-            "scale": _val(op, "scale", float(op.get("jitter", 0.5))),
+            "translate": _val(op, "translate", 0.1),
+            "scale": _val(op, "scale", 0.5),
         }
 
     if backend == "torchvision":
@@ -79,18 +89,28 @@ def build_online_transforms(cfg: dict, backend: str):
 
         if not enabled:
             return transforms.Compose([])
-        t_list = []
+
+        t_list: list[Any] = []
         if op.get("hflip"):
             t_list.append(transforms.RandomHorizontalFlip(p=0.5))
 
-        h, s, v = _hsv(op, "hsv_h", 0.015), _hsv(op, "hsv_s", 0.7), _hsv(op, "hsv_v", 0.4)
-        if h > 0 or s > 0 or v > 0 or op.get("color_jitter"):
-            t_list.append(transforms.ColorJitter(
-                brightness=v or 0.2, contrast=0.2, saturation=s or 0.2, hue=min(h, 0.5)
-            ))
+        h = _val(op, "hsv_h", 0.015)
+        s = _val(op, "hsv_s", 0.7)
+        v = _val(op, "hsv_v", 0.4)
+        if h > 0 or s > 0 or v > 0:
+            t_list.append(
+                transforms.ColorJitter(
+                    brightness=v,
+                    contrast=0.2 if (v > 0 or s > 0) else 0.0,
+                    saturation=s,
+                    hue=min(h, 0.5),
+                )
+            )
         return transforms.Compose(t_list)
 
-    raise ValueError(f"Backend không hợp lệ: {backend!r}. Chọn 'ultralytics' hoặc 'torchvision'.")
+    raise ValueError(
+        f"Backend không hợp lệ: {backend!r}. Chọn 'ultralytics' hoặc 'torchvision'."
+    )
 
 
 def _finite_float(value: Any, name: str) -> float:
@@ -317,9 +337,9 @@ def apply_partial_occlusion_to_boxes(
 def get_online_occlusion_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Đọc cấu hình che khuất riêng, không thêm kwargs train Ultralytics.
 
-    ``occlusion_p`` được ưu tiên; nếu thiếu hoặc None, dùng ``occlusion``.
-    Cờ ``occlusion=True`` tương ứng xác suất 0.30, False tương ứng 0.0.
-    Các giá trị xác suất dạng số, kể cả boolean, được chuyển sang float.
+    Khi bật, ``occlusion_p`` và ``occlusion_ratio`` mặc định là 0.30
+    nếu thiếu hoặc bằng None. Xác suất dạng số, kể cả boolean,
+    được chuyển sang float. Tỷ lệ được giới hạn vào [0.05, 0.90].
 
     Raises:
         ValueError: Xác suất ngoài [0, 1] hoặc tham số không hữu hạn.
@@ -331,13 +351,9 @@ def get_online_occlusion_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     probability_value = op.get("occlusion_p")
     if probability_value is None:
-        probability_value = op.get("occlusion")
-        if probability_value is None:
-            probability_value = 0.30
-        elif isinstance(probability_value, bool):
-            probability_value = 0.30 if probability_value else 0.0
+        probability_value = 0.30
 
-    ratio_value = op.get("occlusion_ratio", 0.30)
+    ratio_value = op.get("occlusion_ratio")
     if ratio_value is None:
         ratio_value = 0.30
 

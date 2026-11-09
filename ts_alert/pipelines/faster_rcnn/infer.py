@@ -21,17 +21,28 @@ class FasterRCNNDetector(BaseDetector):
     name = "faster_rcnn"
 
     def __init__(self, weights: str | Path, cfg: dict) -> None:
-        """Nạp cấu hình, danh sách lớp và mô hình trên thiết bị khả dụng."""
-        self.conf = float(cfg["inference"]["conf_threshold"])
+        """Nạp cấu hình, thiết bị, mô hình và áp dụng ngưỡng NMS IoU."""
+        inference = cfg.get("inference", {})
+        self.conf = float(inference.get("conf_threshold", 0.25))
+        self.iou = float(inference.get("iou_threshold", 0.5))
         self.classes = load_classes(resolve_path(cfg["paths"]["classes_csv"]))
+
+        requested = str(cfg.get("device", "auto"))
         self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
+            "cuda"
+            if torch.cuda.is_available() and requested != "cpu"
+            else "cpu"
         )
         self.model = load_checkpoint(
             weights,
             num_classes=get_num_classes(cfg) + 1,
             device=str(self.device),
         )
+
+        if hasattr(self.model, "roi_heads") and hasattr(
+            self.model.roi_heads, "nms_thresh"
+        ):
+            self.model.roi_heads.nms_thresh = self.iou
 
     def predict(self, frame: NDArray[np.uint8] | None) -> list[Detection]:
         """Chuyển ảnh BGR sang RGB và lọc phát hiện theo ngưỡng tin cậy."""

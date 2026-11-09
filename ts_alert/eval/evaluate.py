@@ -19,6 +19,22 @@ from ts_alert.runtime import video_io
 from ts_alert.utils.io import load_classes, write_json
 
 
+_DETECTION_METRIC_KEYS = ("mAP50-95", "mAP50", "mAP75", "AR100")
+_ALLOWED_EVAL_METRICS = frozenset(
+    {
+        "mAP50-95",
+        "mAP50",
+        "mAP75",
+        "AR100",
+        "precision",
+        "recall",
+        "f1",
+        "fps",
+        "latency_ms",
+    }
+)
+
+
 def load_split_samples(cfg: dict, split: str = "test") -> list[dict]:
     """Đọc ảnh và nhãn YOLO của một tập dữ liệu.
 
@@ -95,9 +111,31 @@ def evaluate_detector(
 ) -> dict:
     """Tính mAP, AR, precision, recall, F1 và đo tốc độ detector.
 
+    eval.metrics chọn các chỉ số mAP/AR cần trả về; thiếu hoặc rỗng
+    thì giữ toàn bộ. Precision, recall, F1 và benchmark luôn được giữ.
     Khi có out_dir, lưu ma trận nhầm lẫn dạng PNG và JSON kèm các
     dự đoán. Tên lớp thiếu hoặc rỗng trong CSV dùng dạng Class_<id>.
     """
+    eval_cfg = cfg.get("eval", {})
+    configured_metrics = eval_cfg.get("metrics")
+    requested: list[str] = []
+
+    if configured_metrics is not None:
+        if isinstance(configured_metrics, (str, bytes)):
+            raise ValueError("eval.metrics phải là danh sách tên metric hợp lệ.")
+
+        try:
+            metric_items = iter(configured_metrics)
+        except TypeError as exc:
+            raise ValueError(
+                "eval.metrics phải là danh sách tên metric hợp lệ."
+            ) from exc
+
+        for item in metric_items:
+            if not isinstance(item, str) or item not in _ALLOWED_EVAL_METRICS:
+                raise ValueError(f"Metric đánh giá không hợp lệ: {item!r}")
+            requested.append(item)
+
     inference = cfg.get("inference", {})
     conf_threshold = float(inference.get("conf_threshold", 0.25))
     iou_threshold = float(inference.get("iou_threshold", 0.5))
@@ -120,6 +158,14 @@ def evaluate_detector(
         iou_threshold=iou_threshold,
         conf_threshold=conf_threshold,
     )
+
+    if requested:
+        selected = set(requested)
+        result = {
+            k: v
+            for k, v in result.items()
+            if k not in _DETECTION_METRIC_KEYS or k in selected
+        }
 
     if out_dir is not None:
         output = Path(out_dir)

@@ -502,7 +502,10 @@ class FasterRCNNPipeline(BasePipeline):
                     train_cfg.get("num_workers", 0),
                 )
                 workers = int(
-                    runtime_cfg.get("num_workers", default_workers)
+                    runtime_cfg.get(
+                        "workers",
+                        runtime_cfg.get("num_workers", default_workers),
+                    )
                     if isinstance(runtime_cfg, Mapping)
                     else default_workers
                 )
@@ -567,6 +570,15 @@ class FasterRCNNPipeline(BasePipeline):
                     num_classes + 1,
                     pretrained=bool(cfg["model"].get("pretrained", True)),
                 ).to(device)
+                iou_thresh = float(
+                    (cfg.get("inference") or {}).get("iou_threshold", 0.5)
+                )
+                if (
+                    0.0 < iou_thresh <= 1.0
+                    and hasattr(core, "roi_heads")
+                    and hasattr(core.roi_heads, "nms_thresh")
+                ):
+                    core.roi_heads.nms_thresh = iou_thresh
 
                 model: nn.Module = core
                 if distributed:

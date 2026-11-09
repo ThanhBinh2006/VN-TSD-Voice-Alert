@@ -549,7 +549,7 @@ class YoloPipeline(BasePipeline):
             "patience": int(train.get("early_stopping_patience", 10)),
             "amp": bool(train.get("amp", True)),
             "optimizer": train.get("optimizer", "auto"),
-            "lr0": float(train.get("lr0", train.get("lr", 0.01))),
+            "lr0": float(train.get("lr", train.get("lr0", 0.01))),
             "project": run_dir.parent.resolve().as_posix(),
             "name": run_dir.name,
             "exist_ok": True,
@@ -667,7 +667,13 @@ class YoloPipeline(BasePipeline):
             hook.wandb_run_id = wandb_run_id
             hook._wandb_run = wandb_run
 
-            model = load_model(cfg["model"].get("pretrained") or "yolo26m.pt")
+            model_cfg = cfg.get("model") or {}
+            model_ref = model_cfg.get("pretrained") or (
+                f"{model_cfg['name']}.pt"
+                if model_cfg.get("name")
+                else "yolo26m.pt"
+            )
+            model = load_model(model_ref)
             self._attach_tracking(model, hook)
 
             if occ_cfg["enabled"] and occ_cfg["p"] > 0.0:

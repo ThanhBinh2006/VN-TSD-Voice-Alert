@@ -1,21 +1,17 @@
 # Owner: Thành viên 2 — pipeline Faster R-CNN + preprocessing online.
 # Online ops bên dưới chỉ chạy khi enabled: true.
-# KHÔNG đặt train.batch_size / eval.batch_size ở đây. Cả hai lấy từ configs/shared.yaml.
+# KHÔNG đặt train.batch_size / train.epochs / eval.batch_size ở đây. Các khóa dùng chung lấy từ configs/shared.yaml.
 pipeline: faster_rcnn
 inherits: configs/shared.yaml
 
 model:
-  family: faster_rcnn
-  backbone: resnet50            # torchvision fasterrcnn_resnet50_fpn (torchvision==0.24.1)
-  pretrained: true              # COCO_V1
+  pretrained: true              # COCO_V1 (torchvision fasterrcnn_resnet50_fpn == 0.24.1)
   weights: models/faster_rcnn/best.pth
   # Box predictor phải là data.num_classes + 1 (thêm background).
   # DataLoader phải dùng per_rank_batch để tổng batch không bị áp dụng lên MỖI GPU.
 
 train:
-  epochs: 100                    # Thống nhất 100 epochs cho cả hai mô hình
   lr: 0.005
-  lr0: 0.005                   # Hỗ trợ cả lr và lr0
   optimizer: SGD                # SGD, Adam, AdamW
   # Optimization hyperparameters
   momentum: 0.9                 # Momentum của optimizer (SGD momentum / Adam beta1)
@@ -26,18 +22,11 @@ train:
 
 online_preprocess:
   enabled: false
-  letterbox: true
-  normalize: true
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
-  # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
-  mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation
-  mixup: 0.15                   # Xác suất sử dụng MixUp
-  scale: 0.5                    # Mức độ thay đổi tỷ lệ ảnh (+/- fraction)
-  degrees: 0.0                  # Góc xoay ảnh (+/- deg)
-  translate: 0.1                # Mức độ dịch chuyển ảnh (+/- fraction)
-  hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 1.0)
-  hsv_s: 0.7                    # Biến đổi độ bão hòa Saturation (0.0 - 1.0)
-  hsv_v: 0.4                    # Biến đổi độ sáng Brightness (0.0 - 1.0)
+  # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true; ColorJitter + che khuất một phần)
+  hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 0.5)
+  hsv_s: 0.7                    # Biến đổi độ bão hòa Saturation
+  hsv_v: 0.4                    # Biến đổi độ sáng Brightness
   occlusion_p: 0.30             # Xác suất áp dụng che khuất một phần góc/cạnh trên mỗi ảnh khi train (0.0 = tắt)
   occlusion_ratio: 0.30         # Tỉ lệ độ bị che phủ theo góc/cạnh của từng box (0.05 - 0.90)
 

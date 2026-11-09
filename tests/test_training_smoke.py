@@ -374,7 +374,7 @@ def cfg(tmp_path: Path) -> Config:
             "epochs": 2, "batch_size": 2, "num_workers": 0,
             "early_stopping_patience": 10, "amp": False,
             "primary_metric": "mAP50-95", "optimizer": "SGD",
-            "lr": 0.01, "lr0": 0.01, "momentum": 0.9,
+            "lr": 0.01, "momentum": 0.9,
             "weight_decay": 0.0, "warmup_epochs": 0.0,
             "require_wandb": True, "run_name": "cpu_smoke",
         },
@@ -887,3 +887,120 @@ def test_yolo_multi_gpu_missing_wandb_key_falls_back(
     assert "WANDB_API_KEY" not in tracking.os.environ
     assert "WANDB_API_KEY" in capsys.readouterr().err
     fake_wandb.init.assert_not_called()
+
+
+def test_resolved_configs_minimal_and_active() -> None:
+    """Cấu hình chuẩn chỉ giữ các khóa đang dùng và huấn luyện 100 epoch."""
+    from ts_alert.config.resolve import resolve_config
+
+    for pipeline in ("yolo", "faster_rcnn"):
+        resolved = resolve_config(pipeline)
+        assert "family" not in resolved["model"]
+        assert "backbone" not in resolved["model"]
+        assert "lr0" not in resolved["train"]
+        assert resolved["train"]["epochs"] == 100
+        assert all(
+            key not in resolved["online_preprocess"]
+            for key in ("letterbox", "normalize", "degrees")
+        )
+        if pipeline == "faster_rcnn":
+            assert all(
+                key not in resolved["online_preprocess"]
+                for key in ("mosaic", "mixup", "scale", "translate")
+            )
+
+
+def test_yolo_lr_precedence_and_model_name_fallback(
+    cfg: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_wandb: ModuleType,
+) -> None:
+    """YOLO ưu tiên lr và dùng tên model khi pretrained bằng None."""
+    module = importlib.import_module("ts_alert.pipelines.yolo.train")
+    cfg["train"]["lr"] = 0.002
+    cfg["train"]["lr0"] = 0.99
+    args = module.YoloPipeline(cfg)._train_args(
+        Path(cfg["paths"]["outputs_dir"]) / "lr_precedence",
+        Path(cfg["paths"]["processed_dir"]) / "data.yaml",
+    )
+    assert args["lr0"] == pytest.approx(0.002)
+
+    cfg["model"]["pretrained"] = None
+    cfg["model"]["name"] = "yolo26n"
+    cfg["model"]["weights"] = str(Path(cfg["model"]["weights"]).with_suffix(".pt"))
+    load_model = Mock(return_value=FakeYOLO())
+    monkeypatch.setattr(module, "load_model", load_model)
+    monkeypatch.setattr(module, "YoloDetector", StaticDetector)
+
+    module.YoloPipeline(cfg).fit()
+    load_model.assert_called_once_with("yolo26n.pt")
+    fake_wandb.init.assert_not_called()
+
+
+def test_faster_rcnn_detector_applies_iou_and_device(
+    cfg: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detector áp dụng IoU và giữ CPU khi CUDA khả dụng."""
+    import ts_alert.pipelines.faster_rcnn.infer as infer_mod
+
+    fake_model = SimpleNamespace(roi_heads=SimpleNamespace(nms_thresh=0.5))
+    monkeypatch.setattr(
+        infer_mod, "load_checkpoint", Mock(return_value=fake_model)
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    cfg["inference"]["iou_threshold"] = 0.35
+    cfg["device"] = "cpu"
+
+    detector = infer_mod.FasterRCNNDetector("dummy.pth", cfg)
+    assert detector.model.roi_heads.nms_thresh == pytest.approx(0.35)
+    assert detector.device.type == "cpu"
+
+
+def test_evaluate_detector_respects_eval_metrics(
+    cfg: Config,
+    tmp_path: Path,
+) -> None:
+    """Evaluator lọc mAP/AR, giữ metric cơ bản và từ chối tên không hợp lệ."""
+    cfg["eval"]["metrics"] = ["mAP50-95"]
+    result = evaluate.evaluate_detector(StaticDetector(), cfg)
+    assert {
+        "mAP50-95", "precision", "recall", "f1", "fps", "latency_ms"
+    } <= result.keys()
+    assert {"mAP50", "mAP75", "AR100"}.isdisjoint(result)
+
+    cfg["eval"]["metrics"] = ["mAP50-95", "mAP50", "mAP75", "AR100"]
+    result = evaluate.evaluate_detector(StaticDetector(), cfg)
+    assert {"mAP50-95", "mAP50", "mAP75", "AR100"} <= result.keys()
+
+    cfg["eval"]["metrics"] = ["invalid_metric"]
+    with pytest.raises(ValueError):
+        evaluate.evaluate_detector(StaticDetector(), cfg)
+
+
+def test_color_jitter_respects_zero_hsv_v() -> None:
+    """Chỉ thay đổi hue khi hsv_s và hsv_v đều bằng 0."""
+    from torchvision.transforms import ColorJitter
+
+    from ts_alert.data.preprocess_online import build_online_transforms
+
+    transforms = build_online_transforms(
+        {
+            "online_preprocess": {
+                "enabled": True,
+                "hsv_h": 0.02,
+                "hsv_s": 0.0,
+                "hsv_v": 0.0,
+            }
+        },
+        "torchvision",
+    )
+    jitter = next(
+        transform
+        for transform in transforms.transforms
+        if isinstance(transform, ColorJitter)
+    )
+    assert jitter.brightness is None
+    assert jitter.contrast is None
+    assert jitter.saturation is None
+    assert jitter.hue == pytest.approx((-0.02, 0.02))
