@@ -66,3 +66,13 @@ app:                            # Owner: Thành viên 3 (thêm/bớt khoá tuỳ
   host: 127.0.0.1
   port: 5000
   max_upload_mb: 200
+
+sweep:                          # Tham số mặc định cho W&B Sweep (tools.run_sweep)
+  method: bayes                 # bayes | random | grid
+  metric:
+    name: best/metric
+    goal: maximize
+  count: 10                     # Số lần thử mặc định mỗi lần chạy sweep
+  early_terminate:
+    type: hyperband
+    min_iter: 5

@@ -1,8 +1,12 @@
-"""FasterRCNNDetector: suy luận trên 1 khung hình.   Phụ trách: Thành viên 2"""
+"""Suy luận biển báo bằng Faster R-CNN trên ảnh BGR."""
+
 from __future__ import annotations
 
-import torch
+from pathlib import Path
+
 import numpy as np
+import torch
+from numpy.typing import NDArray
 
 from ts_alert.config.resolve import get_num_classes, resolve_path
 from ts_alert.pipelines.base import BaseDetector
@@ -12,58 +16,55 @@ from ts_alert.utils.io import load_classes
 
 
 class FasterRCNNDetector(BaseDetector):
+    """Phát hiện biển báo và trả tọa độ hộp theo ảnh gốc."""
+
     name = "faster_rcnn"
 
-    def __init__(self, weights, cfg: dict):
-        self.cfg = cfg
-        self.conf = cfg["inference"]["conf_threshold"]
+    def __init__(self, weights: str | Path, cfg: dict) -> None:
+        """Nạp cấu hình, danh sách lớp và mô hình trên thiết bị khả dụng."""
+        self.conf = float(cfg["inference"]["conf_threshold"])
         self.classes = load_classes(resolve_path(cfg["paths"]["classes_csv"]))
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = load_checkpoint(weights, num_classes=get_num_classes(cfg) + 1, device=str(self.device))
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        self.model = load_checkpoint(
+            weights,
+            num_classes=get_num_classes(cfg) + 1,
+            device=str(self.device),
+        )
 
-    def predict(self, frame) -> list[Detection]:
-        """Chạy Faster R-CNN trên frame (BGR) và trả danh sách Detection theo docs/DATA_CONTRACT.md.
-
-        Lưu ý: BGR -> RGB -> tensor [0,1]; lọc score < self.conf; đổi nhãn torchvision (1..N) -> class_id (0..N-1).
-        """
+    def predict(self, frame: NDArray[np.uint8] | None) -> list[Detection]:
+        """Chuyển ảnh BGR sang RGB và lọc phát hiện theo ngưỡng tin cậy."""
         if frame is None or frame.size == 0:
             return []
 
-        rgb = frame[:, :, ::-1].astype(np.float32) / 255.0
+        rgb = np.ascontiguousarray(frame[:, :, ::-1], dtype=np.float32)
+        rgb /= np.float32(255.0)
         tensor = torch.from_numpy(rgb).permute(2, 0, 1).to(self.device)
 
-        self.model.eval()
-        
         with torch.inference_mode():
-            outputs = self.model([tensor])[0]
+            prediction = self.model([tensor])[0]
+            keep = (
+                (prediction["scores"] >= self.conf)
+                & (prediction["labels"] >= 1)
+            )
+            boxes = prediction["boxes"][keep].cpu().tolist()
+            scores = prediction["scores"][keep].cpu().tolist()
+            labels = prediction["labels"][keep].cpu().tolist()
 
         detections: list[Detection] = []
-        boxes = outputs["boxes"]
-        scores = outputs["scores"]
-        labels = outputs["labels"]
-
-        
-        for box, score, label in zip(boxes, scores, labels):
-            confidence = float(score.item())
-
-            if confidence < self.conf:
-                continue
-
-            x1, y1, x2, y2 = [float(v) for v in box.tolist()]
-            class_id = int(label.item()) - 1
-            if class_id < 0:
-                continue
-
-            name = self.classes.get(class_id, {}).get("name", "")
-            if not name:
-                continue
-
+        for box, confidence, label in zip(boxes, scores, labels):
+            class_id = int(label) - 1
             detections.append(
                 {
-                    "bbox": [x1, y1, x2, y2],
-                    "label": name,
+                    "bbox": [float(coordinate) for coordinate in box],
+                    "label": str(
+                        self.classes.get(class_id, {}).get(
+                            "name", f"Class_{class_id}"
+                        )
+                    ),
                     "class_id": class_id,
-                    "confidence": confidence,
+                    "confidence": float(confidence),
                 }
             )
 

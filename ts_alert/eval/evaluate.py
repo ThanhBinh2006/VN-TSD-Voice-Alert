@@ -1,67 +1,185 @@
-"""Luồng đánh giá một detector trên tập Test: độ chính xác (mAP...) + tốc độ (FPS)."""
+"""Đọc tập dữ liệu YOLO, đánh giá detector và lưu kết quả."""
+
 from __future__ import annotations
 
-from ts_alert.config.resolve import get_num_classes
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from PIL import Image
+
+from ts_alert.config.resolve import (
+    get_num_classes,
+    get_processed_root,
+    resolve_path,
+)
 from ts_alert.eval import benchmark, metrics
+from ts_alert.types import IMAGE_EXTS
 from ts_alert.runtime import video_io
+from ts_alert.utils.io import load_classes, write_json
 
 
 def load_split_samples(cfg: dict, split: str = "test") -> list[dict]:
-    """Đọc <get_processed_root(cfg)>/{images,labels}/<split>.
+    """Đọc ảnh và nhãn YOLO của một tập dữ liệu.
 
-    Trả [{"image_path": Path, "gt": [{"bbox": [x1,y1,x2,y2] (pixel), "class_id": int}, ...]}, ...]
+    Nhãn YOLO có dạng ``class_id cx cy bw bh`` với tọa độ chuẩn hóa.
+    Kết quả chứa đường dẫn ảnh và GT có bbox dạng xyxy theo pixel.
+    Ảnh không có tệp nhãn được xem là ảnh không có đối tượng.
     """
-    from PIL import Image
-    from ts_alert.config.resolve import get_processed_root
+    root = get_processed_root(cfg)
+    image_dir = root / "images" / split
+    label_dir = root / "labels" / split
 
-    processed = get_processed_root(cfg)
-    img_dir = processed / "images" / split
-    lbl_dir = processed / "labels" / split
-    samples = []
-    if not img_dir.is_dir():
-        return samples
+    if not image_dir.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy thư mục ảnh: {image_dir}")
 
-    for img_p in sorted(img_dir.glob("*.*")):
-        if img_p.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+    samples: list[dict] = []
+    for image_path in sorted(image_dir.iterdir()):
+        if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTS:
             continue
-        gt = []
-        lbl_p = lbl_dir / f"{img_p.stem}.txt"
-        if lbl_p.exists():
-            h, w = 640, 640
-            try:
-                with Image.open(img_p) as im:
-                    w, h = im.size
-            except Exception:
-                pass
-            with open(lbl_p, "r", encoding="utf-8") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 5:
-                        try:
-                            cid = int(parts[0])
-                            cx, cy, bw, bh = map(float, parts[1:5])
-                            x1 = (cx - bw / 2) * w
-                            y1 = (cy - bh / 2) * h
-                            x2 = (cx + bw / 2) * w
-                            y2 = (cy + bh / 2) * h
-                            gt.append({"bbox": [x1, y1, x2, y2], "class_id": cid})
-                        except ValueError:
-                            continue
-        samples.append({"image_path": img_p, "gt": gt})
+
+        with Image.open(image_path) as image:
+            width, height = image.size
+
+        gt: list[dict[str, Any]] = []
+        label_path = label_dir / f"{image_path.stem}.txt"
+        if label_path.is_file():
+            for line_number, line in enumerate(
+                label_path.read_text(encoding="utf-8-sig").splitlines(),
+                start=1,
+            ):
+                fields = line.split()
+                if not fields:
+                    continue
+
+                try:
+                    if len(fields) != 5:
+                        raise ValueError("Mỗi dòng phải có đúng 5 giá trị.")
+
+                    class_id = int(fields[0])
+                    cx, cy, bw, bh = map(float, fields[1:])
+                    if class_id < 0:
+                        raise ValueError("class_id phải không âm.")
+                    if not np.isfinite([cx, cy, bw, bh]).all():
+                        raise ValueError("Tọa độ phải hữu hạn.")
+                    if bw < 0 or bh < 0:
+                        raise ValueError("Kích thước bbox phải không âm.")
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Nhãn YOLO không hợp lệ tại "
+                        f"{label_path}:{line_number}: {exc}"
+                    ) from exc
+
+                gt.append(
+                    {
+                        "class_id": class_id,
+                        "bbox": [
+                            (cx - bw / 2) * width,
+                            (cy - bh / 2) * height,
+                            (cx + bw / 2) * width,
+                            (cy + bh / 2) * height,
+                        ],
+                    }
+                )
+
+        samples.append({"image_path": image_path, "gt": gt})
+
     return samples
 
 
-def evaluate_detector(detector, cfg: dict, split: str = "test") -> dict:
-    samples = load_split_samples(cfg, split)
+def evaluate_detector(
+    detector: Any,
+    cfg: dict,
+    split: str = "test",
+    out_dir: Path | str | None = None,
+) -> dict:
+    """Tính mAP, AR, precision, recall, F1 và đo tốc độ detector.
 
-    frames, preds, gts = [], [], []
-    for s in samples:
-        frame = video_io.read_image(s["image_path"])
+    Khi có out_dir, lưu ma trận nhầm lẫn dạng PNG và JSON kèm các
+    dự đoán. Tên lớp thiếu hoặc rỗng trong CSV dùng dạng Class_<id>.
+    """
+    inference = cfg.get("inference", {})
+    conf_threshold = float(inference.get("conf_threshold", 0.25))
+    iou_threshold = float(inference.get("iou_threshold", 0.5))
+    num_classes = get_num_classes(cfg)
+
+    frames: list[np.ndarray] = []
+    preds: list[list[dict[str, Any]]] = []
+    gts: list[list[dict[str, Any]]] = []
+
+    for sample in load_split_samples(cfg, split):
+        frame = video_io.read_image(sample["image_path"])
         frames.append(frame)
         preds.append(detector.predict(frame))
-        gts.append(s["gt"])
+        gts.append(sample["gt"])
 
-    result = metrics.compute_metrics(preds, gts, get_num_classes(cfg))
+    result = metrics.compute_metrics(
+        preds,
+        gts,
+        num_classes,
+        iou_threshold=iou_threshold,
+        conf_threshold=conf_threshold,
+    )
+
+    if out_dir is not None:
+        output = Path(out_dir)
+        output.mkdir(parents=True, exist_ok=True)
+
+        cm, y_true, y_pred = metrics.compute_confusion_matrix(
+            preds,
+            gts,
+            num_classes,
+            iou_threshold=iou_threshold,
+            conf_threshold=conf_threshold,
+        )
+
+        classes = load_classes(resolve_path(cfg["paths"]["classes_csv"]))
+        class_names: list[str] = []
+        for cid in range(num_classes):
+            name = classes.get(cid, {}).get("name")
+            class_names.append(
+                name.strip()
+                if isinstance(name, str) and name.strip()
+                else f"Class_{cid}"
+            )
+
+        metrics.save_confusion_matrix_plot(
+            cm,
+            class_names,
+            output / "confusion_matrix.png",
+        )
+
+        # Chuyển dữ liệu số NumPy/Torch thành kiểu Python để ghi JSON.
+        serialized_preds: list[list[dict[str, Any]]] = [
+            [
+                {
+                    "bbox": [float(value) for value in prediction["bbox"]],
+                    "class_id": int(prediction["class_id"]),
+                    "confidence": float(prediction.get("confidence", 1.0)),
+                }
+                for prediction in image_predictions
+            ]
+            for image_predictions in preds
+        ]
+
+        write_json(
+            {
+                "labels": class_names + ["background"],
+                "class_names": class_names,
+                "matrix": cm.tolist(),
+                "y_true": [int(label) for label in y_true],
+                "y_pred": [int(label) for label in y_pred],
+                "preds": serialized_preds,
+            },
+            output / "confusion_matrix.json",
+        )
+
     bench = cfg["eval"]["benchmark"]
-    result.update(benchmark.measure_fps(detector, frames[:bench["num_frames"]], warmup=bench["warmup"]))
+    result.update(
+        benchmark.measure_fps(
+            detector,
+            frames[:bench["num_frames"]],
+            warmup=bench["warmup"],
+        )
+    )
     return result

@@ -1,406 +1,917 @@
-"""FasterRCNNPipeline: vòng lặp huấn luyện PyTorch (DDP qua torchrun).   Phụ trách: Thành viên 2"""
+"""Huấn luyện Faster R-CNN trên CPU, một GPU hoặc DDP."""
+
 from __future__ import annotations
 
+import math
 import os
+import random
 import shutil
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from PIL import Image
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset
-from torch.utils.data.distributed import DistributedSampler
-from torchvision.transforms.functional import to_tensor
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torchvision import transforms
+from torchvision.transforms import functional as TF
 
-from ts_alert.config.resolve import get_num_classes, get_processed_root
+from ts_alert.config.resolve import get_num_classes, get_processed_root, resolve_path
 from ts_alert.data.preprocess_online import (
     apply_partial_occlusion_to_boxes,
     build_online_transforms,
     get_online_occlusion_config,
 )
-from ts_alert.eval import metrics as eval_metrics
+from ts_alert.eval.metrics import compute_metrics
 from ts_alert.pipelines.base import BasePipeline
 from ts_alert.pipelines.faster_rcnn.infer import FasterRCNNDetector
 from ts_alert.pipelines.faster_rcnn.model import build_model
-from ts_alert.runtime.batch import get_rank, get_world_size, is_main_process, per_rank_batch
+from ts_alert.runtime.batch import per_rank_batch
 from ts_alert.runtime.run_dir import make_run_dir
-from ts_alert.utils.io import write_json
+from ts_alert.types import IMAGE_EXTS
+from ts_alert.utils.io import write_json, write_yaml
 from ts_alert.utils.seed import set_seed
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+TensorDict = dict[str, torch.Tensor]
+Batch = tuple[list[torch.Tensor], list[TensorDict]]
 
 
-def _read_yolo_boxes(label_path: Path, width: int, height: int, num_fg_classes: int):
-    """Đọc nhãn YOLO -> boxes pixel xyxy + labels torchvision (class_id + 1, 0 là background)."""
+def _read_yolo_boxes(
+    label_path: Path | str,
+    width: int,
+    height: int,
+    num_fg_classes: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Đọc nhãn YOLO, clip bbox và chuyển lớp foreground sang chỉ số từ 1."""
     boxes: list[list[float]] = []
     labels: list[int] = []
-    if label_path.exists():
-        with open(label_path, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                cls_id = int(float(parts[0]))
-                if not 0 <= cls_id < num_fg_classes:
-                    raise ValueError(f"class_id {cls_id} ngoài khoảng [0, {num_fg_classes}) trong {label_path}")
-                xc, yc = float(parts[1]) * width, float(parts[2]) * height
-                bw, bh = float(parts[3]) * width, float(parts[4]) * height
-                x1, y1 = max(0.0, xc - bw / 2.0), max(0.0, yc - bh / 2.0)
-                x2, y2 = min(float(width), xc + bw / 2.0), min(float(height), yc + bh / 2.0)
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                boxes.append([x1, y1, x2, y2])
-                labels.append(cls_id + 1)
+    path = Path(label_path)
 
-    if not boxes:
-        return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.int64)
-    return np.asarray(boxes, dtype=np.float32), np.asarray(labels, dtype=np.int64)
+    if path.is_file():
+        for line_number, line in enumerate(
+            path.read_text(encoding="utf-8-sig").splitlines(), 1
+        ):
+            if not line.strip():
+                continue
+            try:
+                fields = line.split()
+                if len(fields) != 5:
+                    raise ValueError("Mỗi dòng phải có đúng 5 giá trị.")
+
+                cid = int(fields[0])
+                cx, cy, bw, bh = map(float, fields[1:])
+
+                if not 0 <= cid < num_fg_classes:
+                    raise ValueError("class_id nằm ngoài danh mục lớp.")
+                if not all(math.isfinite(v) for v in (cx, cy, bw, bh)):
+                    raise ValueError("Tọa độ phải hữu hạn.")
+                if bw <= 0 or bh <= 0:
+                    raise ValueError("Kích thước bbox phải dương.")
+
+                x1 = max(0.0, min(float(width), (cx - bw / 2) * width))
+                y1 = max(0.0, min(float(height), (cy - bh / 2) * height))
+                x2 = max(0.0, min(float(width), (cx + bw / 2) * width))
+                y2 = max(0.0, min(float(height), (cy + bh / 2) * height))
+
+                if x2 > x1 and y2 > y1:
+                    boxes.append([x1, y1, x2, y2])
+                    labels.append(cid + 1)
+            except (ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"Nhãn lỗi tại {path}:{line_number}: {exc}"
+                ) from exc
+
+    return (
+        torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4),
+        torch.tensor(labels, dtype=torch.int64),
+    )
 
 
-class _FasterRCNNDataset(Dataset):
-    """Đọc ảnh và nhãn YOLO, hỗ trợ che khuất theo bounding box trước transform."""
+class _FasterRCNNDataset(Dataset[TensorDict]):
+    """Dataset cấp module, hỗ trợ pickle và augment đồng bộ ảnh với bbox."""
 
     def __init__(
         self,
-        processed_root: Path,
+        root: Path | str,
         split: str,
         num_fg_classes: int,
-        transforms=None,
-        occlusion_cfg: dict | None = None,
+        transform: Any = None,
+        occlusion_cfg: dict[str, Any] | None = None,
     ) -> None:
-        """Khởi tạo dataset; mặc định không áp dụng che khuất."""
-        self.image_dir = processed_root / "images" / split
-        self.label_dir = processed_root / "labels" / split
+        """Lưu đường dẫn và cấu hình; không giữ handle ảnh hoặc RNG riêng."""
+        self.root = Path(root)
+        self.split = split
         self.num_fg_classes = num_fg_classes
-        self.transforms = transforms
-        occ = occlusion_cfg or {}
-        self.occlusion_p = float(occ.get("p", 0.0)) if occ.get("enabled", True) else 0.0
-        self.occlusion_ratio = float(occ.get("ratio", 0.30))
-        if not self.image_dir.exists():
-            raise FileNotFoundError(f"Không tìm thấy thư mục dữ liệu {split}: {self.image_dir}")
-        self.samples = sorted(p for p in self.image_dir.glob("*") if p.suffix.lower() in IMAGE_EXTS)
+        self.transform = transform
+
+        image_dir = self.root / "images" / split
+        if not image_dir.is_dir():
+            raise FileNotFoundError(f"Không tìm thấy thư mục ảnh: {image_dir}")
+
+        self.images = sorted(
+            path
+            for path in image_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTS
+        )
+
+        occlusion = occlusion_cfg or {}
+        self.occlusion_p = (
+            float(occlusion.get("p", 0.30))
+            if occlusion.get("enabled", False)
+            else 0.0
+        )
+        self.occlusion_ratio = float(occlusion.get("ratio", 0.30))
 
     def __len__(self) -> int:
-        """Trả về số ảnh trong split."""
-        return len(self.samples)
+        """Trả số ảnh trong split."""
+        return len(self.images)
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        """Đọc mẫu, áp dụng che khuất nếu bật và giữ nguyên boxes, labels."""
-        image_path = self.samples[index]
-        label_path = self.label_dir / f"{image_path.stem}.txt"
-        image = Image.open(image_path).convert("RGB")
-        width, height = image.size
-        boxes, labels = _read_yolo_boxes(label_path, width, height, self.num_fg_classes)
+    def _augment(
+        self,
+        image: Image.Image,
+        boxes: torch.Tensor,
+        operation: Any,
+    ) -> tuple[Image.Image, torch.Tensor]:
+        """Áp dụng Compose, lật ngang có sửa bbox hoặc ColorJitter."""
+        if isinstance(operation, transforms.Compose):
+            for child in operation.transforms:
+                image, boxes = self._augment(image, boxes, child)
+        elif isinstance(operation, transforms.RandomHorizontalFlip):
+            if random.random() < operation.p:
+                width = image.width
+                image = TF.hflip(image)
+                boxes = boxes.clone()
+                boxes[:, [0, 2]] = width - boxes[:, [2, 0]]
+        elif isinstance(operation, transforms.ColorJitter):
+            image = operation(image)
+        else:
+            raise TypeError(
+                f"Transform chưa hỗ trợ đồng bộ bbox: "
+                f"{type(operation).__name__}"
+            )
 
-        if self.occlusion_p > 0.0 and len(boxes) > 0:
-            img_np = np.asarray(image)
-            occluded_np = apply_partial_occlusion_to_boxes(
-                img_np,
-                boxes,
+        return image, boxes
+
+    def __getitem__(self, index: int) -> TensorDict:
+        """Đọc ảnh RGB và nhãn; che khuất giữ nguyên bbox, labels."""
+        path = self.images[index]
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+
+        boxes, labels = _read_yolo_boxes(
+            self.root / "labels" / self.split / f"{path.stem}.txt",
+            image.width,
+            image.height,
+            self.num_fg_classes,
+        )
+
+        if self.transform is not None:
+            image, boxes = self._augment(image, boxes, self.transform)
+
+        pixels = np.array(image, dtype=np.uint8, copy=True)
+        if self.occlusion_p > 0:
+            pixels = apply_partial_occlusion_to_boxes(
+                pixels,
+                boxes.numpy(),
                 occlusion_p=self.occlusion_p,
                 occlusion_ratio=self.occlusion_ratio,
             )
-            if occluded_np is not img_np:
-                image = Image.fromarray(occluded_np)
 
-        if self.transforms is not None:
-            image = self.transforms(image)
-        tensor_image = image if isinstance(image, torch.Tensor) else to_tensor(image)
         return {
-            "image": tensor_image,
-            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
-            "labels": torch.as_tensor(labels, dtype=torch.int64),
+            "image": TF.to_tensor(pixels),
+            "boxes": boxes,
+            "labels": labels,
+            "image_id": torch.tensor(index, dtype=torch.int64),
+            "area": (boxes[:, 2:] - boxes[:, :2]).prod(dim=1),
+            "iscrowd": torch.zeros(len(labels), dtype=torch.int64),
         }
 
 
-def _collate_fn(batch):
-    images = [item["image"] for item in batch]
-    targets = [{"boxes": item["boxes"], "labels": item["labels"]} for item in batch]
-    return images, targets
+def _collate_fn(samples: list[TensorDict]) -> Batch:
+    """Gom ảnh kích thước khác nhau thành danh sách cho detector."""
+    return (
+        [sample["image"] for sample in samples],
+        [
+            {key: value for key, value in sample.items() if key != "image"}
+            for sample in samples
+        ],
+    )
 
 
-def _targets_to(targets, device):
-    return [{k: v.to(device) for k, v in t.items()} for t in targets]
+def _targets_to(
+    targets: list[TensorDict],
+    device: torch.device,
+) -> list[TensorDict]:
+    """Chuyển toàn bộ tensor nhãn sang thiết bị huấn luyện."""
+    return [
+        {key: value.to(device, non_blocking=True) for key, value in target.items()}
+        for target in targets
+    ]
+
+
+def _seed_worker(worker_id: int) -> None:
+    """Đồng bộ seed Python và NumPy với seed worker do PyTorch cấp."""
+    seed = torch.initial_seed() % (2**32)
+    random.seed(seed)
+    np.random.seed(seed)
 
 
 @torch.no_grad()
-def _validate_metrics(model, loader, device, amp: bool, num_fg_classes: int) -> dict:
-    """Chạy suy luận trên val rồi tính chỉ số chung (metrics.compute_metrics). class_id = nhãn torchvision - 1."""
-    model.eval()
-    preds, gts = [], []
-    for images, targets in loader:
-        with torch.autocast(device_type=device.type, enabled=amp):
-            outputs = model([img.to(device) for img in images])
-        for out, tgt in zip(outputs, targets):
-            preds.append([
-                {"bbox": b.tolist(), "label": str(int(l) - 1), "class_id": int(l) - 1, "confidence": float(s)}
-                for b, l, s in zip(out["boxes"].float().cpu(), out["labels"].cpu(), out["scores"].float().cpu())
-            ])
-            gts.append([
-                {"bbox": b.tolist(), "class_id": int(l) - 1}
-                for b, l in zip(tgt["boxes"], tgt["labels"])
-            ])
-    return eval_metrics.compute_metrics(preds, gts, num_fg_classes)
+def _validate_metrics(
+    model: nn.Module,
+    loader: DataLoader[Batch],
+    device: torch.device,
+    num_classes: int,
+    iou_threshold: float = 0.50,
+    conf_threshold: float = 0.25,
+) -> dict[str, float]:
+    """Tính mAP, AR100, precision, recall và F1 với lớp nền được loại bỏ."""
+    previous = {module: module.training for module in model.modules()}
+    predictions: list[list[dict[str, Any]]] = []
+    targets: list[list[dict[str, Any]]] = []
+
+    try:
+        model.eval()
+        for images, batch_targets in loader:
+            outputs = model(
+                [image.to(device, non_blocking=True) for image in images]
+            )
+            for output, target in zip(outputs, batch_targets):
+                boxes = output["boxes"].cpu().tolist()
+                labels = output["labels"].cpu().tolist()
+                scores = output["scores"].cpu().tolist()
+
+                predictions.append([
+                    {
+                        "bbox": box,
+                        "class_id": int(label) - 1,
+                        "confidence": float(score),
+                    }
+                    for box, label, score in zip(boxes, labels, scores)
+                    if 1 <= label <= num_classes
+                ])
+                targets.append([
+                    {"bbox": box, "class_id": int(label) - 1}
+                    for box, label in zip(
+                        target["boxes"].tolist(),
+                        target["labels"].tolist(),
+                    )
+                ])
+
+        return compute_metrics(
+            predictions,
+            targets,
+            num_classes,
+            iou_threshold,
+            conf_threshold,
+        )
+    finally:
+        for module, training in previous.items():
+            module.training = training
 
 
 @torch.no_grad()
-def _validate_loss(model, loader, device, amp: bool) -> float:
-    """Phương án dự phòng khi compute_metrics chưa xong: loss val (torchvision chỉ trả loss ở train mode)."""
-    model.train()
+def _validate_loss(
+    model: nn.Module,
+    loader: DataLoader[Batch],
+    device: torch.device,
+) -> float:
+    """Đo loss ở chế độ train, đóng băng BatchNorm và bảo toàn trạng thái."""
+    previous = {module: module.training for module in model.modules()}
     total = 0.0
-    for images, targets in loader:
-        with torch.autocast(device_type=device.type, enabled=amp):
-            loss_dict = model([img.to(device) for img in images], _targets_to(targets, device))
-        total += float(sum(loss_dict.values()).item())
-    return total / max(1, len(loader))
+    count = 0
+
+    try:
+        # Validation không làm thay đổi RNG dùng cho huấn luyện.
+        cuda_devices = [device.index] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=cuda_devices):
+            model.train()
+            for module in model.modules():
+                if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                    module.eval()
+
+            for images, targets in loader:
+                losses = model(
+                    [image.to(device, non_blocking=True) for image in images],
+                    _targets_to(targets, device),
+                )
+                loss = float(sum(losses.values()).item())
+                if not math.isfinite(loss):
+                    raise FloatingPointError("Validation loss không hữu hạn.")
+
+                total += loss * len(images)
+                count += len(images)
+
+        if count == 0:
+            raise ValueError("Tập validation không có ảnh.")
+
+        return total / count
+    finally:
+        for module, training in previous.items():
+            module.training = training
 
 
-def build_optimizer(model, cfg: dict):
-    """Khởi tạo optimizer theo cấu hình train (SGD, Adam, AdamW, momentum, weight_decay)."""
-    import torch
+def build_optimizer(
+    model: nn.Module,
+    cfg: dict[str, Any],
+) -> torch.optim.Optimizer:
+    """Tạo SGD, Adam hoặc AdamW; tách bias để hỗ trợ warmup bias LR."""
+    train = cfg.get("train", cfg)
+    lr = float(train.get("lr", train.get("lr0", 0.005)))
+    momentum = float(train.get("momentum", 0.9))
+    decay = float(train.get("weight_decay", 0.0005))
 
-    train_cfg = cfg.get("train", {})
-    lr = float(train_cfg.get("lr", train_cfg.get("lr0", 0.005)))
-    momentum = float(train_cfg.get("momentum", 0.9))
-    weight_decay = float(train_cfg.get("weight_decay", 0.0005))
-    opt_name = str(train_cfg.get("optimizer", "SGD")).lower()
+    if not math.isfinite(lr) or lr <= 0:
+        raise ValueError("Learning rate phải hữu hạn và dương.")
 
-    params = [p for p in model.parameters() if p.requires_grad]
+    weights: list[nn.Parameter] = []
+    biases: list[nn.Parameter] = []
 
-    if opt_name == "adam":
-        return torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
-    elif opt_name == "adamw":
-        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
-    else:  # sgd or auto
-        return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            (biases if name.endswith(".bias") else weights).append(parameter)
+
+    groups = [
+        {"params": weights, "is_bias": False},
+        {"params": biases, "is_bias": True},
+    ]
+    name = str(train.get("optimizer", "SGD")).lower()
+
+    if name == "sgd":
+        return torch.optim.SGD(
+            groups,
+            lr=lr,
+            momentum=momentum,
+            weight_decay=decay,
+        )
+
+    if name in {"adam", "adamw"}:
+        optimizer = torch.optim.AdamW if name == "adamw" else torch.optim.Adam
+        return optimizer(
+            groups,
+            lr=lr,
+            betas=(momentum, 0.999),
+            weight_decay=decay,
+        )
+
+    raise ValueError(f"Optimizer không hợp lệ: {name!r}")
 
 
 class FasterRCNNPipeline(BasePipeline):
+    """Quản lý huấn luyện, checkpoint, tracking và đánh giá Faster R-CNN."""
+
     name = "faster_rcnn"
 
-    def fit(self) -> Path:
-        """Fine-tune Faster R-CNN trên ĐÚNG split của Thành viên 1 (get_processed_root(cfg)). Trả về run_dir."""
-        cfg = self.cfg
-        tcfg = cfg["train"]
-        processed_root = get_processed_root(cfg)
-        if not (processed_root / "images" / "train").exists():
-            raise FileNotFoundError(
-                f"Thiếu dữ liệu train đã tiền xử lý ở {processed_root}. Hãy chạy preprocessing trước khi huấn luyện."
-            )
+    def load_detector(
+        self,
+        weights: Path | str | None = None,
+    ) -> FasterRCNNDetector:
+        """Nạp detector từ checkpoint chỉ định hoặc trọng số mặc định."""
+        return FasterRCNNDetector(
+            weights if weights is not None else self.default_weights(),
+            self.cfg,
+        )
 
-        set_seed(cfg["seed"])
-        world_size, rank = get_world_size(), get_rank()
+    def fit(self) -> Path:
+        """Huấn luyện đồng bộ các rank; chỉ rank 0 ghi tệp và đánh giá."""
+        # Import muộn để dataset vẫn có thể được import/pickle độc lập.
+        from ts_alert.pipelines.tracking import (
+            format_epoch_line,
+            init_wandb_run,
+            log_epoch_to_wandb,
+            log_final_to_wandb,
+            plot_training_curves,
+            print_best_banner,
+            save_epoch_artifacts,
+            standardize_epoch_payload,
+        )
+
+        cfg = self.cfg
+        initial_root = get_processed_root(cfg)
+        if not (initial_root / "images" / "train").is_dir():
+            raise FileNotFoundError(initial_root / "images" / "train")
+
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
         distributed = world_size > 1
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
-        if distributed and not torch.cuda.is_available():
-            raise RuntimeError("DDP (WORLD_SIZE > 1) cần GPU/NCCL nhưng không tìm thấy CUDA.")
-        if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            device = torch.device(f"cuda:{local_rank}")
-        else:
-            device = torch.device("cpu")
-        if distributed and not dist.is_initialized():
-            dist.init_process_group("nccl")
+        runtime_cfg = cfg.get("runtime")
+        requested = str(
+            runtime_cfg.get("device", cfg.get("device", "auto"))
+            if isinstance(runtime_cfg, Mapping)
+            else cfg.get("device", "auto")
+        )
+        use_cuda = torch.cuda.is_available() and requested != "cpu"
+        device = torch.device(f"cuda:{local_rank}" if use_cuda else "cpu")
+
+        if use_cuda:
+            torch.cuda.set_device(device)
+
+        created_group = False
+        wandb_run: Any = None
+        owns_wandb = False
+        run_dir: Path | None = None
+        rank = 0
+        summary: dict[str, Any] = {}
 
         try:
-            # run_dir chỉ tạo ở rank 0 rồi chia sẻ đường dẫn cho các rank khác
-            holder = [None]
-            if is_main_process():
-                holder[0] = str(make_run_dir(cfg["paths"]["outputs_dir"], self.name, tcfg.get("run_name"), cfg))
             if distributed:
-                dist.broadcast_object_list(holder, src=0)
-            run_dir = Path(holder[0])
+                if not dist.is_initialized():
+                    dist.init_process_group(
+                        backend="nccl" if use_cuda and os.name != "nt" else "gloo",
+                        init_method="env://",
+                    )
+                    created_group = True
 
-            num_fg = get_num_classes(cfg)
-            model = build_model(num_fg + 1)  # +1 background
-            model = model.to(device)
-            if distributed:
-                model = DDP(model, device_ids=[local_rank])
-            core = model.module if distributed else model
+                world_size = dist.get_world_size()
+                rank = dist.get_rank()
 
-            optimizer = build_optimizer(core, cfg)
-            amp = bool(tcfg.get("amp", False)) and device.type == "cuda"
-            scaler = torch.amp.GradScaler("cuda", enabled=amp)
-
-            # Scheduler warmup nếu có cấu hình warmup_epochs
-            warmup_epochs = int(float(tcfg.get("warmup_epochs", 0)))
-            total_epochs = int(tcfg["epochs"])
-            scheduler = None
-            if warmup_epochs > 0 and total_epochs > warmup_epochs:
-                from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
-                warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
-                main_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, total_epochs - warmup_epochs))
-                scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
-
-            train_tf = build_online_transforms(cfg, "torchvision")
-            occ_cfg = get_online_occlusion_config(cfg)
-            train_ds = _FasterRCNNDataset(
-                processed_root,
-                "train",
-                num_fg,
-                transforms=train_tf,
-                occlusion_cfg=occ_cfg,
-            )
-            val_ds = _FasterRCNNDataset(processed_root, "val", num_fg)
-            if is_main_process() and occ_cfg["enabled"] and occ_cfg["p"] > 0.0:
-                print(
-                    f"[Faster R-CNN] Bật online occlusion: "
-                    f"p={occ_cfg['p']}, ratio={occ_cfg['ratio']}"
-                )
-            per_gpu_batch = per_rank_batch(tcfg["batch_size"])  # batch_size là TỔNG trên mọi GPU
-            runtime_cfg = cfg.get("runtime")
-            workers = runtime_cfg.get("workers", 2) if isinstance(runtime_cfg, dict) else int(cfg.get("workers", 2))
-
-            train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True) if distributed else None
-            train_loader = DataLoader(
-                train_ds, batch_size=per_gpu_batch, shuffle=(train_sampler is None), sampler=train_sampler,
-                collate_fn=_collate_fn, num_workers=workers, pin_memory=device.type == "cuda",
-            )
-            # Val chỉ chạy ở rank 0 trên toàn bộ tập val
-            val_loader = DataLoader(
-                val_ds, batch_size=per_gpu_batch, shuffle=False, collate_fn=_collate_fn, num_workers=workers,
-            ) if is_main_process() else None
-
-            primary = tcfg.get("primary_metric", "mAP50-95")  # càng cao càng tốt
-            patience_limit = int(tcfg.get("early_stopping_patience", 10))
-            best_metric, best_epoch, patience = float("-inf"), -1, 0
-            best_checkpoint = run_dir / "best.pth"
-            history: list[dict] = []
-            use_loss_fallback = False
-
-            wandb = None
-            if is_main_process() and tcfg.get("require_wandb"):
-                import wandb as _wandb
-                wandb = _wandb
-                wandb.init(project=cfg["project"].get("wandb_project", "TSD-Voice-Alert"),
-                           entity=cfg["project"].get("wandb_entity"), config=cfg, dir=str(run_dir))
-
-            if is_main_process():
-                print(f"\n[Faster R-CNN] Bắt đầu huấn luyện {tcfg['epochs']} epochs trên thiết bị {device.type.upper()}...")
-                print(f"{'Epoch':^10} | {'GPU_mem':^8} | {'train_loss':^10} | {'val_loss':^10} | {'mAP50':^8} | {'mAP50-95':^10} | {'lr':^9} | {'Patience':^8}")
-                print("-" * 88)
-
-            for epoch in range(1, int(tcfg["epochs"]) + 1):
-                if train_sampler is not None:
-                    train_sampler.set_epoch(epoch)
-                model.train()
-                running = 0.0
-                for images, targets in train_loader:
-                    inputs = [img.to(device) for img in images]
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.autocast(device_type=device.type, enabled=amp):
-                        loss_dict = model(inputs, _targets_to(targets, device))
-                        losses = sum(loss_dict.values())
-                    scaler.scale(losses).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    running += float(losses.item())
-                train_loss = running / max(1, len(train_loader))
-                cur_lr = optimizer.param_groups[0]["lr"]
-                if scheduler is not None:
-                    scheduler.step()
-
-                stop = torch.zeros(1, device=device)
-                if is_main_process():
-                    val_scores: dict = {}
-                    val_loss = _validate_loss(core, val_loader, device, amp)
-                    val_scores["val_loss"] = round(val_loss, 4)
-                    try:
-                        metric_dict = _validate_metrics(core, val_loader, device, amp, num_fg)
-                        val_scores.update(metric_dict)
-                        metric = float(val_scores.get(primary, -val_loss))
-                    except Exception as e:
-                        warnings.warn(f"Lỗi tính metrics: {e} -> tạm chọn best theo -val_loss.")
-                        metric = -val_loss
-
-                    if metric > best_metric:
-                        best_metric, best_epoch, patience = metric, epoch, 0
-                        torch.save(core.state_dict(), best_checkpoint)
-                    else:
-                        patience += 1
-                    if patience >= patience_limit:
-                        stop.fill_(1)
-
-                    # Hiển thị log epoch thống nhất trên console
-                    gpu_mem = f"{torch.cuda.memory_reserved() / 1e9:.2f}G" if device.type == "cuda" else "CPU"
-                    map50_s = f"{val_scores.get('mAP50', 0.0):.4f}" if "mAP50" in val_scores else "N/A"
-                    map_s = f"{val_scores.get('mAP50-95', 0.0):.4f}" if "mAP50-95" in val_scores else "N/A"
-                    ep_str = f"{epoch}/{tcfg['epochs']}"
-                    pat_str = f"{patience}/{patience_limit}"
-                    print(f"{ep_str:^10} | {gpu_mem:^8} | {train_loss:^10.4f} | {val_loss:^10.4f} | {map50_s:^8} | {map_s:^10} | {cur_lr:^9.6f} | {pat_str:^8}")
-
-                    # Payload chuẩn hoá đồng bộ cho cả JSON, CSV và W&B
-                    payload = {
-                        "epoch": epoch,
-                        "train_loss": round(train_loss, 4),
-                        "train/loss": round(train_loss, 4),
-                        "train/box_loss": round(train_loss * 0.5, 4),
-                        "val/loss": round(val_loss, 4),
-                        "val/box_loss": round(val_loss * 0.5, 4),
-                        "lr": cur_lr,
-                        **val_scores,
-                        "metrics/mAP50(B)": val_scores.get("mAP50", 0.0),
-                        "metrics/mAP50-95(B)": val_scores.get("mAP50-95", 0.0),
-                        "metrics/mAP50": val_scores.get("mAP50", 0.0),
-                        "metrics/mAP50-95": val_scores.get("mAP50-95", 0.0),
-                        "primary_metric": primary,
-                        "best_epoch": best_epoch,
-                        "best_metric": round(best_metric, 4),
-                        "patience": patience,
-                    }
-                    history.append(payload)
-                    write_json(history, run_dir / "metrics_history.json")
-
-                    # Ghi results.csv đồng bộ cột với YOLO
-                    import csv
-                    results_csv = run_dir / "results.csv"
-                    csv_fields = [
-                        "epoch", "train/loss", "train/box_loss", "val/loss", "val/box_loss",
-                        "metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP50", "metrics/mAP50-95",
-                        "lr", "best_metric"
-                    ]
-                    file_exists = results_csv.exists()
-                    with open(results_csv, "a", newline="", encoding="utf-8") as f:
-                        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
-                        if not file_exists:
-                            writer.writeheader()
-                        writer.writerow(payload)
-
-                    if wandb is not None:
-                        wandb.log(payload, step=epoch)
-
+            def synchronize_error(error: str | None) -> None:
+                """Truyền lỗi của rank 0 trước khi rank khác bước vào epoch."""
+                message: list[Any] = [error]
                 if distributed:
-                    dist.broadcast(stop, src=0)  # mọi rank dừng cùng lúc, tránh treo
-                if stop.item() > 0:
-                    break
+                    dist.broadcast_object_list(message, src=0)
+                if message[0] is not None:
+                    raise RuntimeError(message[0])
 
-            if is_main_process():
-                if not best_checkpoint.exists():
-                    raise RuntimeError("Không có checkpoint nào được lưu (kiểm tra epochs/metric).")
-                target = Path(cfg["model"]["weights"])
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(best_checkpoint, target)
-                write_json({"run_dir": str(run_dir), "best_checkpoint": str(best_checkpoint),
-                            "best_epoch": best_epoch, "primary_metric": primary, "best_metric": best_metric,
-                            "weights": str(target)}, run_dir / "summary.json")
-                if wandb is not None:
-                    wandb.finish()
+            try:
+                setup_error: str | None = None
+                if rank == 0:
+                    try:
+                        run_dir = make_run_dir(
+                            resolve_path(cfg["paths"]["outputs_dir"]),
+                            self.name,
+                            cfg["train"].get("run_name"),
+                            cfg,
+                        )
+                        wandb_run, owns_wandb = init_wandb_run(cfg, run_dir)
+                    except Exception as exc:
+                        setup_error = (
+                            f"Khởi tạo run thất bại: {type(exc).__name__}"
+                        )
 
-            if distributed:
-                dist.barrier()
+                synchronize_error(setup_error)
+
+                shared: list[Any] = [
+                    str(run_dir) if rank == 0 else None,
+                    cfg if rank == 0 else None,
+                ]
+                if distributed:
+                    dist.broadcast_object_list(shared, src=0)
+
+                run_dir = Path(shared[0])
+                cfg = shared[1]
+                self.cfg = cfg
+                set_seed(int(cfg["seed"]))
+
+                root = get_processed_root(cfg)
+                if not (root / "images" / "train").is_dir():
+                    raise FileNotFoundError(root / "images" / "train")
+
+                train_cfg = cfg["train"]
+                total_epochs = int(train_cfg["epochs"])
+                if total_epochs < 1:
+                    raise ValueError("train.epochs phải lớn hơn 0.")
+
+                batch_size = per_rank_batch(
+                    int(train_cfg["batch_size"]),
+                    world_size,
+                )
+                if batch_size < 1:
+                    raise ValueError("Batch mỗi rank phải lớn hơn 0.")
+
+                num_classes = get_num_classes(cfg)
+                train_ds = _FasterRCNNDataset(
+                    root,
+                    "train",
+                    num_classes,
+                    transform=build_online_transforms(cfg, "torchvision"),
+                    occlusion_cfg=get_online_occlusion_config(cfg),
+                )
+                if not len(train_ds):
+                    raise ValueError("Tập train không có ảnh.")
+
+                runtime_cfg = cfg.get("runtime")
+                default_workers = cfg.get(
+                    "workers",
+                    train_cfg.get("num_workers", 0),
+                )
+                workers = int(
+                    runtime_cfg.get("num_workers", default_workers)
+                    if isinstance(runtime_cfg, Mapping)
+                    else default_workers
+                )
+
+                loader_kwargs: dict[str, Any] = {
+                    "num_workers": workers,
+                    "pin_memory": use_cuda,
+                    "collate_fn": _collate_fn,
+                    "worker_init_fn": _seed_worker,
+                }
+                if workers > 0:
+                    loader_kwargs["multiprocessing_context"] = "spawn"
+
+                sampler = (
+                    DistributedSampler(
+                        train_ds,
+                        num_replicas=world_size,
+                        rank=rank,
+                        seed=int(cfg["seed"]),
+                    )
+                    if distributed
+                    else None
+                )
+                generator = torch.Generator().manual_seed(
+                    int(cfg["seed"]) + rank
+                )
+                train_loader: DataLoader[Batch] = DataLoader(
+                    train_ds,
+                    batch_size=batch_size,
+                    shuffle=sampler is None,
+                    sampler=sampler,
+                    generator=generator,
+                    **loader_kwargs,
+                )
+
+                val_loader: DataLoader[Batch] | None = None
+                validation_error: str | None = None
+                if rank == 0:
+                    try:
+                        val_ds = _FasterRCNNDataset(root, "val", num_classes)
+                        if not len(val_ds):
+                            raise ValueError("Tập validation không có ảnh.")
+
+                        val_loader = DataLoader(
+                            val_ds,
+                            batch_size=int(cfg["eval"]["batch_size"]),
+                            shuffle=False,
+                            generator=torch.Generator().manual_seed(
+                                int(cfg["seed"])
+                            ),
+                            **loader_kwargs,
+                        )
+                        write_yaml(cfg, run_dir / "config.yaml")
+                    except Exception as exc:
+                        validation_error = (
+                            f"Không thể tạo validation loader: {exc}"
+                        )
+
+                synchronize_error(validation_error)
+
+                core = build_model(
+                    num_classes + 1,
+                    pretrained=bool(cfg["model"].get("pretrained", True)),
+                ).to(device)
+
+                model: nn.Module = core
+                if distributed:
+                    model = DDP(
+                        core,
+                        device_ids=[device.index] if use_cuda else None,
+                        broadcast_buffers=True,
+                    )
+
+                optimizer = build_optimizer(core, cfg)
+                amp_enabled = bool(train_cfg.get("amp", True)) and use_cuda
+                scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+                steps_per_epoch = len(train_loader)
+                total_steps = total_epochs * steps_per_epoch
+                warmup_steps = min(
+                    float(train_cfg.get("warmup_epochs", 3.0))
+                    * steps_per_epoch,
+                    max(0, total_steps - 1),
+                )
+                base_lrs = [
+                    float(group["lr"])
+                    for group in optimizer.param_groups
+                ]
+                momentum = float(train_cfg.get("momentum", 0.9))
+                warmup_momentum = float(
+                    train_cfg.get("warmup_momentum", 0.8)
+                )
+                warmup_bias_lr = float(train_cfg.get("warmup_bias_lr", 0.1))
+                minimum_factor = float(train_cfg.get("lrf", 0.01))
+
+                def schedule(step: int) -> None:
+                    """Cập nhật LR theo bước: warmup tuyến tính rồi cosine."""
+                    progress = max(0.0, step - warmup_steps) / max(
+                        1.0,
+                        total_steps - 1 - warmup_steps,
+                    )
+                    factor = minimum_factor + (1.0 - minimum_factor) * (
+                        1.0 + math.cos(math.pi * min(1.0, progress))
+                    ) / 2.0
+                    fraction = (
+                        min(1.0, step / warmup_steps)
+                        if warmup_steps > 0
+                        else 1.0
+                    )
+
+                    for group, base_lr in zip(
+                        optimizer.param_groups,
+                        base_lrs,
+                    ):
+                        start_lr = (
+                            warmup_bias_lr if group["is_bias"] else 0.0
+                        )
+                        group["lr"] = (
+                            start_lr + (base_lr - start_lr) * fraction
+                            if step < warmup_steps
+                            else base_lr * factor
+                        )
+                        current_momentum = (
+                            warmup_momentum
+                            + (momentum - warmup_momentum) * fraction
+                        )
+                        if "momentum" in group:
+                            group["momentum"] = current_momentum
+                        if "betas" in group:
+                            group["betas"] = (
+                                current_momentum,
+                                group["betas"][1],
+                            )
+
+                primary = str(
+                    train_cfg.get("primary_metric", "mAP50-95")
+                ).removeprefix("val/")
+                best_metric = -math.inf
+                best_epoch = 0
+                stale_epochs = 0
+                patience = int(
+                    train_cfg.get("early_stopping_patience", 10)
+                )
+                history: list[dict[str, Any]] = []
+                inference_cfg = cfg.get("inference", {})
+
+                for epoch in range(1, total_epochs + 1):
+                    if sampler is not None:
+                        sampler.set_epoch(epoch)
+
+                    model.train()
+                    accumulated = torch.zeros(
+                        2,
+                        dtype=torch.float64,
+                        device=device,
+                    )
+
+                    for batch_index, (images, targets) in enumerate(
+                        train_loader
+                    ):
+                        schedule(
+                            (epoch - 1) * steps_per_epoch + batch_index
+                        )
+                        optimizer.zero_grad(set_to_none=True)
+
+                        with torch.autocast(
+                            device_type=device.type,
+                            enabled=amp_enabled,
+                        ):
+                            loss_parts = model(
+                                [
+                                    image.to(device, non_blocking=True)
+                                    for image in images
+                                ],
+                                _targets_to(targets, device),
+                            )
+                            loss = sum(loss_parts.values())
+
+                        finite = torch.isfinite(loss.detach()).to(
+                            torch.int32
+                        )
+                        if distributed:
+                            dist.all_reduce(
+                                finite,
+                                op=dist.ReduceOp.MIN,
+                            )
+                        if not bool(finite.item()):
+                            raise FloatingPointError(
+                                "Train loss không hữu hạn."
+                            )
+
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+
+                        accumulated[0] += (
+                            loss.detach().double() * len(images)
+                        )
+                        accumulated[1] += len(images)
+
+                    if distributed:
+                        dist.all_reduce(accumulated)
+                        # Validation dùng core, không gọi DDP trên riêng rank 0.
+                        for buffer in core.buffers():
+                            dist.broadcast(buffer, src=0)
+
+                    epoch_error: str | None = None
+                    stop = False
+
+                    if rank == 0:
+                        try:
+                            assert val_loader is not None
+                            val_loss = _validate_loss(
+                                core,
+                                val_loader,
+                                device,
+                            )
+                            scores: dict[str, float] = {}
+
+                            try:
+                                scores = _validate_metrics(
+                                    core,
+                                    val_loader,
+                                    device,
+                                    num_classes,
+                                    float(
+                                        inference_cfg.get(
+                                            "iou_threshold",
+                                            0.5,
+                                        )
+                                    ),
+                                    float(
+                                        inference_cfg.get(
+                                            "conf_threshold",
+                                            0.25,
+                                        )
+                                    ),
+                                )
+                                if primary != "neg_loss" and (
+                                    primary not in scores
+                                    or not math.isfinite(
+                                        float(scores[primary])
+                                    )
+                                ):
+                                    raise ValueError(
+                                        "Primary metric không hợp lệ."
+                                    )
+                            except Exception as exc:
+                                warnings.warn(
+                                    f"Validation metric lỗi "
+                                    f"({type(exc).__name__}); "
+                                    "chuyển sang tối ưu -val_loss.",
+                                    RuntimeWarning,
+                                    stacklevel=2,
+                                )
+                                if primary != "neg_loss":
+                                    # Reset khi đổi sang thang đo loss.
+                                    primary = "neg_loss"
+                                    best_metric = -math.inf
+                                    stale_epochs = 0
+
+                            scores["neg_loss"] = -val_loss
+                            current_metric = float(scores[primary])
+                            is_best = current_metric > best_metric
+
+                            if is_best:
+                                torch.save(
+                                    core.state_dict(),
+                                    run_dir / "best.pth",
+                                )
+                                best_metric = current_metric
+                                best_epoch = epoch
+                                stale_epochs = 0
+                            else:
+                                stale_epochs += 1
+
+                            lr = float(optimizer.param_groups[0]["lr"])
+                            train_loss = float(
+                                (accumulated[0] / accumulated[1]).item()
+                            )
+                            payload = standardize_epoch_payload(
+                                epoch,
+                                train_loss,
+                                val_loss,
+                                scores,
+                                lr,
+                                best_epoch,
+                                best_metric,
+                                is_best,
+                                extra={
+                                    "val/neg_loss": -val_loss,
+                                    "patience": stale_epochs,
+                                },
+                            )
+
+                            history.append(payload)
+                            save_epoch_artifacts(
+                                run_dir,
+                                history,
+                                payload,
+                            )
+                            log_epoch_to_wandb(
+                                wandb_run,
+                                payload,
+                                primary,
+                            )
+                            print(
+                                format_epoch_line(
+                                    payload,
+                                    total_epochs=total_epochs,
+                                    primary_metric=primary,
+                                ),
+                                flush=True,
+                            )
+                            stop = (
+                                patience > 0
+                                and stale_epochs >= patience
+                            )
+                        except Exception as exc:
+                            epoch_error = (
+                                f"Epoch {epoch} thất bại: {exc}"
+                            )
+
+                    synchronize_error(epoch_error)
+
+                    control = torch.tensor(
+                        int(stop),
+                        dtype=torch.int32,
+                        device=device,
+                    )
+                    if distributed:
+                        dist.broadcast(control, src=0)
+                    if bool(control.item()):
+                        break
+
+                final_error: str | None = None
+                if rank == 0:
+                    try:
+                        destination = resolve_path(
+                            cfg["model"]["weights"]
+                        )
+                        destination.parent.mkdir(
+                            parents=True,
+                            exist_ok=True,
+                        )
+                        checkpoint = run_dir / "best.pth"
+                        if checkpoint.resolve() != destination.resolve():
+                            shutil.copy2(checkpoint, destination)
+
+                        plot_training_curves(
+                            history,
+                            run_dir / "training_curves.png",
+                            best_epoch=best_epoch,
+                            primary_metric=primary,
+                        )
+                        print_best_banner(
+                            best_epoch,
+                            best_metric,
+                            primary,
+                        )
+
+                        summary = {
+                            "pipeline": self.name,
+                            "primary_metric": primary,
+                            "best_epoch": best_epoch,
+                            "best_metric": best_metric,
+                            "epochs_completed": len(history),
+                            "best_checkpoint": str(checkpoint),
+                            "weights": str(destination),
+                            "wandb_run_id": getattr(
+                                wandb_run,
+                                "id",
+                                None,
+                            ),
+                        }
+                        write_json(
+                            summary,
+                            run_dir / "summary.json",
+                        )
+                    except Exception as exc:
+                        final_error = (
+                            f"Hoàn tất huấn luyện thất bại: {exc}"
+                        )
+
+                synchronize_error(final_error)
+            finally:
+                # Không barrier trong finally: rank lỗi có thể đã rời nhóm.
+                if created_group and dist.is_initialized():
+                    dist.destroy_process_group()
+
+            assert run_dir is not None
+            if rank == 0:
+                test_metrics: dict[str, Any] | None = None
+                if cfg.get("eval", {}).get("auto_eval_test", False):
+                    test_metrics = self.evaluate(run_dir)
+                    summary["test_metrics"] = test_metrics
+                    write_json(
+                        summary,
+                        run_dir / "summary.json",
+                    )
+
+                log_final_to_wandb(
+                    wandb_run,
+                    run_dir,
+                    test_metrics=test_metrics,
+                    cm_json_path=run_dir / "confusion_matrix.json",
+                )
+
+            return run_dir
         finally:
-            if distributed and dist.is_initialized():
-                dist.destroy_process_group()
-
-        # Đánh giá test sau khi đã đóng nhóm DDP, chỉ rank 0 chạy
-        if is_main_process() and cfg["eval"].get("auto_eval_test", False):
-            self.evaluate(run_dir)
-
-        return run_dir
-
-    def load_detector(self, weights=None) -> FasterRCNNDetector:
-        return FasterRCNNDetector(weights or self.default_weights(), self.cfg)
+            if rank == 0 and owns_wandb and wandb_run is not None:
+                wandb_run.finish()
