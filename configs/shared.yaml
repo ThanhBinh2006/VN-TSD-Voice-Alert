@@ -35,6 +35,7 @@ eval:
 inference:
   conf_threshold: 0.25
   iou_threshold: 0.5
+  frame_stride: 30              # Số frame bỏ qua giữa 2 lần gọi model (1 = đoán mọi frame, 30 = mỗi 30 frame đoán 1 lần)
 
 project:                        # Tuỳ chọn: theo dõi thí nghiệm bằng Weights & Biases
   wandb_base_url: null          # TODO: null = wandb.ai; điền nếu nhóm dùng server riêng

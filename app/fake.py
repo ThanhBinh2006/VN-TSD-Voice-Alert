@@ -103,18 +103,35 @@ def _fake_merge_audio_video(video_path, audio_events, out_path):
 class _FakeDeduplicator:
     """Một nhãn chỉ đọc lại khi đã vắng quá lost_frames khung hình."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: dict) -> None:
         self.lost_frames = cfg["postprocess"]["dedup"]["lost_frames"]
+
+        frame_stride = (cfg.get("inference") or {}).get("frame_stride", 1)
+        if frame_stride is None:
+            frame_stride = 1
+        if isinstance(frame_stride, bool):
+            raise ValueError("inference.frame_stride không được là bool.")
+
+        self.frame_stride = int(frame_stride)
+        if self.frame_stride < 1:
+            raise ValueError("inference.frame_stride phải >= 1.")
+
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         self.last_seen: dict[str, int] = {}
 
-    def update(self, detections, frame_index, timestamp_sec):
-        events = []
+    def update(
+        self,
+        detections: list[dict],
+        frame_index: int,
+        timestamp_sec: float,
+    ) -> list[dict]:
+        effective_lost_frames = max(self.lost_frames, self.frame_stride)
+        events: list[dict] = []
         for det in detections:
             last = self.last_seen.get(det["label"])
-            if last is None or frame_index - last > self.lost_frames:
+            if last is None or frame_index - last > effective_lost_frames:
                 events.append({"detection": det, "label": det["label"], "position": det.get("position", "front"),
                                "frame_index": frame_index, "timestamp_sec": timestamp_sec})
             self.last_seen[det["label"]] = frame_index

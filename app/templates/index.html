@@ -60,6 +60,18 @@
             </fieldset>
             <button id="submit-btn" class="button light" type="submit">Bắt đầu xử lý</button>
           </div>
+
+          <!-- Cấu hình frame stride khi xử lý video -->
+          <div class="upload-options">
+            <div class="stride-row">
+              <label for="frame-stride-input" class="stride-label">
+                <span class="stride-title">Mỗi</span>
+                <input id="frame-stride-input" name="frame_stride" type="number" min="1" max="300" step="1" value="30" class="stride-input num" aria-describedby="stride-hint">
+                <span class="stride-unit">frame đoán 1 lần</span>
+              </label>
+              <span id="stride-hint" class="stride-hint">Số càng lớn xử lý càng nhanh; 1 = từng frame, 30 = ~1 lần/giây ở video 30fps.</span>
+            </div>
+          </div>
           <p id="form-error" class="form-error" role="alert"></p>
 
           <div id="upload-progress" class="upload-progress" hidden>
@@ -102,9 +114,27 @@
             <div class="screen">
               <video id="result-video" controls playsinline preload="metadata"></video>
               <img id="result-image" alt="Ảnh kết quả đã đánh dấu biển báo" hidden>
+              <img id="live-stream" alt="Luồng video đang nhận diện trực tiếp" hidden>
               <ul id="hud" class="hud" aria-label="Thông số xử lý"></ul>
               <!-- Câu cảnh báo hiện như bảng LED trên cao tốc, đúng lúc giọng nói phát -->
               <p id="caption" class="led" aria-live="polite" hidden></p>
+            </div>
+
+            <!-- Dải điều khiển & tiến độ trực tiếp khi đang xử lý video -->
+            <div id="live-bar" class="live-bar" hidden>
+              <div class="live-bar-head">
+                <div class="live-badge">
+                  <span class="live-dot" aria-hidden="true"></span>
+                  <span id="live-status-text">Đang xử lý &amp; phát trực tiếp</span>
+                </div>
+                <button id="live-audio-btn" class="live-audio-btn" type="button" aria-pressed="true" title="Bật/tắt giọng nói cảnh báo trực tiếp">
+                  <svg class="audio-icon on" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303zm-1.66-1.66A6.08 6.08 0 0 0 11.536 8a6.08 6.08 0 0 0-1.66-4.35l-.707.707A5.09 5.09 0 0 1 10.536 8a5.09 5.09 0 0 1-1.367 3.643zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06z"/></svg>
+                  <svg class="audio-icon off" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden><path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zm7.137 1.596a.5.5 0 0 1 0 .708L12.707 7l1.147 1.146a.5.5 0 0 1-.708.708L12 7.707l-1.146 1.147a.5.5 0 0 1-.708-.708L11.293 7l-1.147-1.146a.5.5 0 0 1 .708-.708L12 6.293l1.146-1.147a.5.5 0 0 1 .708 0z"/></svg>
+                  <span id="live-audio-label">Giọng nói: Bật</span>
+                </button>
+              </div>
+              <div class="track"><div id="live-fill" class="track-fill"></div></div>
+              <p id="live-detail" class="live-detail num"></p>
             </div>
 
             <div id="road-wrap" class="road-wrap">

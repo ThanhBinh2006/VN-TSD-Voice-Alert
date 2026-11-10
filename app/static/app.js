@@ -1,7 +1,8 @@
 /* Giao diện web TSD Voice Alert (bản 3).   Phụ trách: Thành viên 3
    JavaScript thuần, không thư viện. Chỉ gọi các API trong app/main.py:
      GET /api/health, POST /api/jobs, GET /api/jobs, GET /api/jobs/<id>,
-     GET /api/jobs/<id>/voice-events, GET /api/jobs/<id>/detections
+     GET /api/jobs/<id>/voice-events, GET /api/jobs/<id>/detections,
+     GET /api/jobs/<id>/stream
    Điều hướng bằng hash: "#/job/12" mở chi tiết job 12, "#/" là màn hình tải file lên. */
 "use strict";
 
@@ -20,11 +21,35 @@ const STAGE_LABEL = {
   failed: "Xử lý thất bại",
 };
 const CAPTION_SECONDS = 3;        // phụ đề cảnh báo hiện trong 3 giây kể từ lúc phát
-const POLL_MS = 1000;
+const POLL_MS_QUEUE = 750;        // chu kỳ poll khi đang chờ / nạp model
+const POLL_MS_LIVE = 400;         // chu kỳ poll khi đang phát stream trực tiếp
 const DENSITY_BINS = 30;          // số cột của biểu đồ "Mật độ biển báo"
 const PLAY_ICON = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1.2v9.6L10.4 6z" fill="currentColor"/></svg>';
 
-const state = { jobId: null, job: null, pollTimer: null, events: [], detections: [], duration: 0, maxUploadMb: 200 };
+const state = {
+  jobId: null,
+  job: null,
+  pollTimer: null,
+  pollInFlight: false,
+  events: [],
+  detections: [],
+  duration: 0,
+  maxUploadMb: 200,
+  defaultFrameStride: 30,
+
+  // Luồng live streaming & âm thanh trực tiếp
+  activeStreamJobId: null,
+  liveAudioEnabled: true,
+  liveAudioBlocked: false,
+  audioUnlocked: false,
+  audioCtx: null,
+  audioQueue: [],
+  currentAudio: null,
+  seenEventIds: new Set(),
+  eventsInitializedForJob: null,
+  autoPlayLiveJobId: null,
+  captionTimer: null,
+};
 
 /* ------------------------------------------------------------------ tiện ích */
 
@@ -76,6 +101,147 @@ function svg(tag, attrs = {}, text) {
   return node;
 }
 
+/* ------------------------------------------------------------------ âm thanh trực tiếp (Audio Autoplay & Queue) */
+
+/** Mở khóa quyền autoplay âm thanh từ tương tác người dùng. */
+function unlockAudio() {
+  state.audioUnlocked = true;
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      if (!state.audioCtx) state.audioCtx = new AudioCtx();
+      if (state.audioCtx.state === "suspended") {
+        state.audioCtx.resume().catch(() => {});
+      }
+    }
+    const silent = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
+    silent.volume = 0;
+    const p = silent.play();
+    if (p && p.then) p.catch(() => {});
+  } catch (_) {}
+}
+
+/** Phát tuần tự từng câu cảnh báo trong hàng đợi âm thanh trực tiếp, không phát đè nhau. */
+function playNextAudio() {
+  if (!state.liveAudioEnabled) {
+    state.audioQueue = [];
+    return;
+  }
+  if (state.currentAudio != null) return;
+  if (state.audioQueue.length === 0) return;
+
+  const ev = state.audioQueue.shift();
+  if (!ev || !ev.audio_url) {
+    playNextAudio();
+    return;
+  }
+
+  const audio = new Audio(ev.audio_url);
+  state.currentAudio = audio;
+
+  const finish = () => {
+    if (state.currentAudio === audio) {
+      state.currentAudio = null;
+    }
+    playNextAudio();
+  };
+
+  audio.addEventListener("ended", finish, { once: true });
+  audio.addEventListener("error", finish, { once: true });
+
+  audio.play().catch((err) => {
+    const isAutoplayBlocked = err && (
+      err.name === "NotAllowedError" ||
+      err.name === "AbortError" ||
+      /play\(\) failed because the user didn't interact/i.test(err.message || "")
+    );
+
+    if (isAutoplayBlocked) {
+      console.warn("Autoplay audio bị chặn:", err);
+      state.liveAudioBlocked = true;
+      // Đưa lại câu cảnh báo vào đầu hàng đợi, cắt bớt nếu tồn đọng quá 8 câu
+      state.audioQueue.unshift(ev);
+      if (state.audioQueue.length > 8) {
+        state.audioQueue = state.audioQueue.slice(-8);
+      }
+      state.currentAudio = null;
+      updateLiveAudioBtn(true, true);
+      return; // Dừng tại đây, chờ người dùng bấm nút mở khóa
+    }
+
+    // Các lỗi khác (network / file hỏng): bỏ qua câu này và phát câu tiếp theo
+    console.warn("Lỗi phát audio:", err);
+    finish();
+  });
+}
+
+/** Dừng hẳn việc phát âm thanh trực tiếp và xóa hàng đợi. */
+function stopLiveAudio() {
+  if (state.currentAudio) {
+    try {
+      state.currentAudio.pause();
+      state.currentAudio.removeAttribute("src");
+    } catch (_) {}
+    state.currentAudio = null;
+  }
+  state.audioQueue = [];
+  state.liveAudioBlocked = false;
+}
+
+/** Cập nhật giao diện nút bật/tắt tiếng trực tiếp. */
+function updateLiveAudioBtn(enabled, blocked = false) {
+  const btn = $("live-audio-btn");
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  btn.classList.toggle("muted", !enabled);
+
+  const iconOn = btn.querySelector(".audio-icon.on");
+  const iconOff = btn.querySelector(".audio-icon.off");
+  if (iconOn && iconOff) {
+    iconOn.hidden = !enabled;
+    iconOff.hidden = enabled;
+  }
+
+  const label = $("live-audio-label");
+  if (label) {
+    if (blocked && enabled) {
+      label.textContent = "Bật tiếng trực tiếp";
+    } else {
+      label.textContent = enabled ? "Giọng nói: Bật" : "Giọng nói: Tắt";
+    }
+  }
+}
+
+function toggleLiveAudio() {
+  unlockAudio();
+  if (state.liveAudioBlocked) {
+    // Đang bị chặn autoplay: bấm nút là mở tiếng và phát ngay hàng đợi chờ
+    state.liveAudioBlocked = false;
+    state.liveAudioEnabled = true;
+    updateLiveAudioBtn(true, false);
+    playNextAudio();
+    return;
+  }
+
+  state.liveAudioEnabled = !state.liveAudioEnabled;
+  updateLiveAudioBtn(state.liveAudioEnabled, false);
+  if (!state.liveAudioEnabled) {
+    stopLiveAudio();
+  } else {
+    playNextAudio();
+  }
+}
+
+/** Giải phóng luồng MJPEG để trình duyệt đóng socket ngay lập tức. */
+function teardownLiveStream() {
+  const liveImg = $("live-stream");
+  if (liveImg) {
+    liveImg.hidden = true;
+    liveImg.removeAttribute("src");
+  }
+  state.activeStreamJobId = null;
+}
+
 /* ------------------------------------------------------------------ trạng thái server */
 
 async function loadHealth() {
@@ -87,6 +253,16 @@ async function loadHealth() {
     const exts = (h.accept || []).map((e) => e.slice(1)).join(", ");
     $("accept-hint").textContent = `Hỗ trợ ${exts}. Tối đa ${h.max_upload_mb} MB.`;
     $("file-input").setAttribute("accept", (h.accept || []).join(","));
+
+    // Tự điền frame_stride từ cấu hình server nếu người dùng chưa sửa tay
+    if (h.frame_stride != null) {
+      state.defaultFrameStride = h.frame_stride;
+      const strideInput = $("frame-stride-input");
+      if (strideInput && !strideInput.dataset.userEdited) {
+        strideInput.value = String(h.frame_stride);
+      }
+    }
+
     if (h.fake) {
       label.textContent = "Chế độ thử: dữ liệu giả";
       chip.className = "status-chip fake";
@@ -107,6 +283,13 @@ function setupUpload() {
   const form = $("upload-form");
   const input = $("file-input");
   const drop = $("drop-zone");
+  const strideInput = $("frame-stride-input");
+
+  if (strideInput) {
+    strideInput.addEventListener("input", () => {
+      strideInput.dataset.userEdited = "true";
+    });
+  }
 
   const showFile = () => {
     const file = input.files[0];
@@ -140,6 +323,22 @@ function setupUpload() {
       $("form-error").textContent = `File nặng ${(file.size / 1048576).toFixed(0)} MB, vượt giới hạn ${state.maxUploadMb} MB. Hãy cắt ngắn video rồi thử lại.`;
       return;
     }
+
+    if (strideInput) {
+      const rawStride = strideInput.value.trim();
+      if (!/^\d+$/.test(rawStride)) {
+        $("form-error").textContent = "Số frame đoán 1 lần (frame_stride) phải là số nguyên từ 1 đến 300.";
+        return;
+      }
+      const strideVal = parseInt(rawStride, 10);
+      if (strideVal < 1 || strideVal > 300) {
+        $("form-error").textContent = "Số frame đoán 1 lần (frame_stride) phải là số nguyên từ 1 đến 300.";
+        return;
+      }
+    }
+
+    // Mở khóa âm thanh từ sự kiện submit của người dùng
+    unlockAudio();
     uploadFile(new FormData(form));
   });
 }
@@ -148,6 +347,7 @@ function setupUpload() {
 function uploadFile(formData) {
   const xhr = new XMLHttpRequest();
   const button = $("submit-btn");
+  const strideInput = $("frame-stride-input");
   button.disabled = true;
   $("form-error").textContent = "";
   $("upload-progress").hidden = false;
@@ -167,6 +367,13 @@ function uploadFile(formData) {
     if (xhr.status === 202) {
       $("upload-form").reset();
       $("file-name").hidden = true;
+      if (strideInput) {
+        delete strideInput.dataset.userEdited;
+        strideInput.value = String(state.defaultFrameStride ?? 30);
+      }
+      if (body.job_id) {
+        state.autoPlayLiveJobId = body.job_id;
+      }
       location.hash = `#/job/${body.job_id}`;
       loadHistory();
     } else if (xhr.status === 0) {
@@ -198,31 +405,76 @@ async function loadHistory() {
   }
 }
 
-/* ------------------------------------------------------------------ chi tiết job */
+/* ------------------------------------------------------------------ dọn dẹp & chi tiết job */
 
 function stopPolling() {
   clearTimeout(state.pollTimer);
   state.pollTimer = null;
 }
 
-function showUploadView() {
+function clearJobArtifacts() {
   stopPolling();
-  state.jobId = null;
-  $("job-view").hidden = true;
-  $("home").hidden = false;
+  teardownLiveStream();
+  stopLiveAudio();
+  clearTimeout(state.captionTimer);
+  state.captionTimer = null;
+
   const video = $("result-video");
   video.pause();
   video.removeAttribute("src");
   video.load();
+
+  const liveImg = $("live-stream");
+  if (liveImg) {
+    liveImg.hidden = true;
+    liveImg.removeAttribute("src");
+  }
+
+  const liveBar = $("live-bar");
+  if (liveBar) liveBar.hidden = true;
+
+  const caption = $("caption");
+  if (caption) {
+    caption.hidden = true;
+    caption.textContent = "";
+  }
+
+  // Reset đầu đọc playhead về mốc 0:00
+  const playhead = $("road") ? $("road").querySelector(".playhead") : null;
+  if (playhead) playhead.style.setProperty("--p", 0);
+}
+
+function showUploadView() {
+  clearJobArtifacts();
+  state.jobId = null;
+  state.job = null;
+  $("job-view").hidden = true;
+  $("home").hidden = false;
   loadHistory();
 }
 
 function showJobView(jobId) {
-  stopPolling();
-  Object.assign(state, { jobId, job: null, events: [], detections: [], duration: 0 });
+  clearJobArtifacts();
+  Object.assign(state, {
+    jobId,
+    job: null,
+    events: [],
+    detections: [],
+    duration: 0,
+    pollInFlight: false,
+    activeStreamJobId: null,
+    seenEventIds: new Set(),
+    eventsInitializedForJob: null,
+  });
+
+  updateLiveAudioBtn(state.liveAudioEnabled, false);
+
   $("home").hidden = true;
   $("job-view").hidden = false;
-  for (const id of ["result", "insights", "events-card", "error-panel", "download-link"]) $(id).hidden = true;
+  for (const id of ["result", "insights", "events-card", "error-panel", "download-link", "live-bar"]) {
+    const elNode = $(id);
+    if (elNode) elNode.hidden = true;
+  }
   $("progress-panel").hidden = false;
   $("job-title").textContent = `Job ${jobId}`;
   $("job-meta").replaceChildren();
@@ -234,30 +486,73 @@ function showJobView(jobId) {
   pollJob(jobId);
 }
 
+/* ------------------------------------------------------------------ vòng lặp poll & stream */
+
 async function pollJob(jobId) {
+  if (state.jobId !== jobId || state.pollInFlight) return;
+  state.pollInFlight = true;
+
   let job;
   try {
     job = await api(`/api/jobs/${jobId}`);
   } catch (err) {
+    state.pollInFlight = false;
     if (state.jobId !== jobId) return;
     $("stage-text").textContent = err.message;
     $("progress-fill").className = "track-fill failed";
     return;
   }
-  if (state.jobId !== jobId) return;           // người dùng đã chuyển sang job khác
-  renderProgress(job);
-  loadHistory();                                // cập nhật trạng thái trong cột lịch sử
+
+  if (state.jobId !== jobId) {
+    state.pollInFlight = false;
+    return;
+  }
+
+  loadHistory();
+
+  const p = job.progress || {};
+  const stage = p.stage || job.status;
+  const isVideo = job.input_type === "video";
+  const isLiveProcessing = isVideo && (stage === "processing" || stage === "finalizing") && job.status !== "done" && job.status !== "failed";
+
   if (job.status === "done") {
-    renderResult(job);
-  } else if (job.status === "failed") {
+    state.autoPlayLiveJobId = null;
+    state.pollInFlight = false;
+    stopPolling();
+    teardownLiveStream();
+    stopLiveAudio();
+    if ($("live-bar")) $("live-bar").hidden = true;
+    await renderResult(job);
+    return;
+  }
+
+  if (job.status === "failed") {
+    state.autoPlayLiveJobId = null;
+    state.pollInFlight = false;
+    stopPolling();
+    teardownLiveStream();
+    stopLiveAudio();
+    if ($("live-bar")) $("live-bar").hidden = true;
     $("progress-panel").hidden = true;
     $("error-message").textContent = job.error_message || "Không rõ nguyên nhân.";
     $("error-panel").hidden = false;
+    return;
+  }
+
+  if (isLiveProcessing) {
+    await renderLiveProgress(job);
   } else {
-    state.pollTimer = setTimeout(() => pollJob(jobId), POLL_MS);
+    renderProgress(job);
+  }
+
+  state.pollInFlight = false;
+  if (state.jobId === jobId) {
+    const nextInterval = isLiveProcessing ? POLL_MS_LIVE : POLL_MS_QUEUE;
+    state.pollTimer = setTimeout(() => pollJob(jobId), nextInterval);
   }
 }
 
+/** Hiển thị màn hình chờ khi job ở queued hoặc loading_model (hoặc ảnh tĩnh). */
 function renderProgress(job) {
   const p = job.progress || {};
   $("job-title").textContent = displayName(job);
@@ -284,7 +579,158 @@ function renderProgress(job) {
   $("progress-detail").textContent = parts.join(", ");
 }
 
+/** Chế độ Live Streaming: vừa nhận diện, vừa phát luồng trực tiếp và đọc cảnh báo. */
+async function renderLiveProgress(job) {
+  state.job = job;
+  const p = job.progress || {};
+  const stage = p.stage || job.status;
+
+  $("job-title").textContent = displayName(job);
+  const metaItems = [
+    el("li", {}, MODEL_LABEL[job.model_name] || job.model_name),
+    el("li", {}, "Video"),
+    el("li", {}, `Gửi lúc ${formatClock(job.created_at)}`),
+  ];
+  const strideVal = job.frame_stride || p.frame_stride;
+  if (strideVal) {
+    metaItems.push(el("li", { class: "num" }, `Mỗi ${strideVal} frame`));
+  }
+  $("job-meta").replaceChildren(...metaItems);
+
+  // Ẩn panel chờ, hiện ngay khu vực kết quả & dải số liệu
+  $("progress-panel").hidden = true;
+  $("result").hidden = false;
+  $("insights").hidden = false;
+  $("events-card").hidden = false;
+  $("download-link").hidden = true;
+
+  const video = $("result-video");
+  const image = $("result-image");
+  const liveImg = $("live-stream");
+
+  video.hidden = true;
+  video.pause();
+  image.hidden = true;
+
+  // Gán stream_url MỘT LẦN DUY NHẤT để tránh browser ngắt/nối lại MJPEG
+  if (state.activeStreamJobId !== job.id) {
+    state.activeStreamJobId = job.id;
+    liveImg.hidden = false;
+    liveImg.src = job.stream_url || `/api/jobs/${job.id}/stream`;
+  } else if (liveImg.getAttribute("src")) {
+    liveImg.hidden = false;
+  }
+
+  // Dải điều khiển & tiến độ trực tiếp
+  const liveBar = $("live-bar");
+  if (liveBar) {
+    liveBar.hidden = false;
+    const statusText = $("live-status-text");
+    if (statusText) {
+      statusText.textContent = stage === "finalizing"
+        ? "Đang ghép âm thanh vào video…"
+        : "Đang xử lý & phát trực tiếp";
+    }
+
+    const liveFill = $("live-fill");
+    if (liveFill) {
+      if (p.percent == null) {
+        liveFill.className = "track-fill indeterminate";
+      } else {
+        liveFill.className = "track-fill";
+        liveFill.style.width = `${Math.min(100, Math.floor(p.percent))}%`;
+      }
+    }
+
+    const liveDetail = $("live-detail");
+    if (liveDetail) {
+      const parts = [];
+      if (p.frames_done != null && p.frame_count) parts.push(`Khung ${p.frames_done}/${p.frame_count}`);
+      if (p.percent != null) parts.push(`${Math.floor(p.percent)}%`);
+      if (p.fps) parts.push(`${p.fps.toFixed(1)} fps`);
+      if (p.eta_sec != null) parts.push(`còn ~${Math.ceil(p.eta_sec)}s`);
+      if (strideVal) parts.push(`Mỗi ${strideVal} frame đoán 1 lần`);
+      liveDetail.textContent = parts.join(" · ");
+    }
+  }
+
+  // Gọi đồng thời cả 2 API để cập nhật dần dữ liệu ngay trong lúc đang xử lý
+  const [events, detections] = await Promise.all([
+    api(`/api/jobs/${job.id}/voice-events`).catch(() => []),
+    api(`/api/jobs/${job.id}/detections`).catch(() => []),
+  ]);
+  if (state.jobId !== job.id) return;
+
+  state.events = events.sort((a, b) => a.timestamp_sec - b.timestamp_sec);
+  state.detections = detections;
+
+  // Cập nhật độ dài video dự tính
+  state.duration = p.duration_sec || (video.duration > 0 ? video.duration : 0);
+  if (state.duration) {
+    $("road-end").textContent = formatTime(state.duration);
+  }
+
+  // Cập nhật đầu đọc playhead trực tiếp theo timestamp hiện tại của frame đang xử lý
+  const curSec = p.current_timestamp_sec || 0;
+  if (state.duration > 0) {
+    const playhead = $("road") ? $("road").querySelector(".playhead") : null;
+    if (playhead) {
+      playhead.style.setProperty("--p", Math.min(1, curSec / state.duration));
+    }
+  }
+
+  // Phát hiện và xử lý các sự kiện cảnh báo giọng nói mới xuất hiện
+  const isInitialFetch = (state.eventsInitializedForJob !== job.id);
+  const canPlay = (state.autoPlayLiveJobId === job.id || !isInitialFetch);
+
+  state.events.forEach((ev) => {
+    if (!state.seenEventIds.has(ev.id)) {
+      state.seenEventIds.add(ev.id);
+      if (canPlay) {
+        showLiveCaption(ev.spoken_text);
+        state.audioQueue.push(ev);
+        playNextAudio();
+      }
+    }
+  });
+
+  if (isInitialFetch) {
+    state.eventsInitializedForJob = job.id;
+  }
+
+  renderHud(job);
+  renderEvents(true);
+  renderInsights();
+  drawMarkers();
+}
+
+/** Hiện câu cảnh báo trên bảng LED trong 3 giây rồi dọn sạch. */
+function showLiveCaption(text) {
+  const caption = $("caption");
+  if (!caption) return;
+  caption.hidden = false;
+  caption.textContent = text;
+  clearTimeout(state.captionTimer);
+  state.captionTimer = setTimeout(() => {
+    if (state.activeStreamJobId) {
+      caption.hidden = true;
+      caption.textContent = "";
+    }
+  }, CAPTION_SECONDS * 1000);
+}
+
+/** Chuyển sang kết quả hoàn chỉnh sau khi xử lý xong (done). */
 async function renderResult(job) {
+  state.autoPlayLiveJobId = null;
+  clearTimeout(state.captionTimer);
+  state.captionTimer = null;
+  const playhead = $("road") ? $("road").querySelector(".playhead") : null;
+  if (playhead) playhead.style.setProperty("--p", 0);
+
+  teardownLiveStream();
+  stopLiveAudio();
+  if ($("live-bar")) $("live-bar").hidden = true;
+
   const [events, detections] = await Promise.all([
     api(`/api/jobs/${job.id}/voice-events`).catch(() => []),
     api(`/api/jobs/${job.id}/detections`).catch(() => []),
@@ -325,13 +771,17 @@ function renderHud(job) {
   const p = job.progress || {};
   const items = [el("li", { class: "live" }, MODEL_LABEL[job.model_name] || job.model_name)];
   if (p.fps) items.push(el("li", {}, el("b", {}, p.fps.toFixed(1)), " khung/giây"));
-  items.push(el("li", {}, el("b", {}, String(job.unique_sign_count ?? state.events.length)), " biển báo"));
-  items.push(el("li", {}, el("b", {}, String(job.voice_play_count ?? state.events.length)), " lần đọc cảnh báo"));
+  const signCount = job.unique_sign_count ?? p.unique_sign_count ?? state.events.length;
+  const voiceCount = job.voice_play_count ?? p.voice_play_count ?? state.events.length;
+  items.push(el("li", {}, el("b", {}, String(signCount)), " biển báo"));
+  items.push(el("li", {}, el("b", {}, String(voiceCount)), " lần đọc cảnh báo"));
   $("hud").replaceChildren(...items);
 }
 
 function seekTo(sec) {
+  if (state.activeStreamJobId) return;   // Luồng trực tiếp MJPEG không tua được cho tới khi done
   const video = $("result-video");
+  if (!video.src) return;
   video.currentTime = Math.max(0, sec - 0.3);   // lùi 0,3 giây để kịp thấy biển xuất hiện
   video.play().catch(() => {});
 }
@@ -378,7 +828,7 @@ function renderSpeed(job) {
   const box = $("ins-speed");
   box.replaceChildren();
   const p = job.progress || {};
-  const videoFps = job.input_type === "video" && state.duration && p.frame_count ? p.frame_count / state.duration : null;
+  const videoFps = p.video_fps || (job.input_type === "video" && state.duration && p.frame_count ? p.frame_count / state.duration : null);
   const ratio = p.fps && videoFps ? p.fps / videoFps : null;
 
   box.append(el("div", {},
@@ -434,16 +884,18 @@ function renderPositions() {
 function renderTiming(job) {
   const box = $("ins-timing");
   box.replaceChildren();
-  const total = job.total_time_ms || 0;
-  const layer = job.layer_time_ms || 0;
-  const tts = job.tts_time_ms || 0;
+  const p = job.progress || {};
+  const total = job.total_time_ms ?? p.elapsed_ms ?? 0;
+  const layer = job.layer_time_ms ?? p.layer_time_ms ?? 0;
+  const tts = job.tts_time_ms ?? p.tts_time_ms ?? 0;
   const detect = Math.max(0, total - layer - tts);
   const parts = [["c-detect", "Nhận diện", detect], ["c-layer", "Vẽ khung", layer], ["c-tts", "Giọng nói", tts]];
+  const isLive = job.status !== "done";
 
   box.append(el("div", {},
     el("div", { class: "big" }, total >= 1000 ? (total / 1000).toFixed(1) : String(Math.round(total)),
       el("small", {}, total >= 1000 ? "giây" : "ms")),
-    el("p", { class: "caption-sm" }, "tổng thời gian xử lý")));
+    el("p", { class: "caption-sm" }, isLive ? "thời gian đã chạy" : "tổng thời gian xử lý")));
   const split = el("div", { class: "split", role: "img",
     "aria-label": parts.map(([, label, ms]) => `${label} ${formatMs(ms)}`).join(", ") });
   for (const [cls, , ms] of parts) {
@@ -466,12 +918,13 @@ function renderDensity(job) {
       el("p", { class: "caption-sm" }, "biển báo trong ảnh")));
     return;
   }
-  const duration = state.duration || Math.max(0, ...dets.map((d) => d.timestamp_sec)) || 1;
+  const p = job.progress || {};
+  const duration = state.duration || p.duration_sec || Math.max(0, ...dets.map((d) => d.timestamp_sec)) || 1;
   const bins = new Array(DENSITY_BINS).fill(0);
   for (const d of dets) bins[Math.min(DENSITY_BINS - 1, Math.floor((d.timestamp_sec / duration) * DENSITY_BINS))] += 1;
   const max = Math.max(1, ...bins);
   const framesWithSign = new Set(dets.map((d) => d.frame_index)).size;
-  const frameCount = (job.progress || {}).frame_count;
+  const frameCount = p.frame_count;
 
   box.append(el("div", {},
     el("div", { class: "big" }, frameCount ? `${Math.round((100 * framesWithSign) / frameCount)}%` : String(framesWithSign)),
@@ -504,13 +957,19 @@ function drawMarkers() {
   const video = $("result-video");
   const road = $("road");
   road.querySelectorAll(".marker").forEach((m) => m.remove());
-  const duration = video.duration;
-  if (!Number.isFinite(duration) || duration <= 0) return;   // vẽ lại khi có loadedmetadata
+
+  const p = (state.job || {}).progress || {};
+  const duration = (Number.isFinite(video.duration) && video.duration > 0)
+    ? video.duration
+    : (p.duration_sec || state.duration);
+
+  if (!Number.isFinite(duration) || duration <= 0) return;
   state.duration = duration;
   $("road-end").textContent = formatTime(duration);
 
   state.events.forEach((ev, i) => {
     const lane = road.querySelector(`.lane[data-lane="${laneOf(ev)}"]`);
+    if (!lane) return;
     const marker = el("button", { class: "marker", type: "button", "data-index": i,
       title: `${formatTime(ev.timestamp_sec)}: ${ev.spoken_text}`,
       "aria-label": `${formatTime(ev.timestamp_sec)}, ${ev.spoken_text}`,
@@ -523,14 +982,26 @@ function drawMarkers() {
 function setupPlayer() {
   const video = $("result-video");
   const road = $("road");
-  // Có độ dài video thì vẽ được mốc trên dải đường và tính tỉ lệ thời gian thực.
+  const liveImg = $("live-stream");
+
+  // Xử lý khi luồng MJPEG gặp lỗi mạng hoặc đứt kết nối để tránh hiện icon ảnh vỡ
+  if (liveImg) {
+    liveImg.addEventListener("error", () => {
+      if (state.activeStreamJobId === state.jobId) {
+        console.warn("Luồng MJPEG stream bị ngắt hoặc lỗi tải ảnh.");
+        liveImg.hidden = true;
+        liveImg.removeAttribute("src");
+      }
+    });
+  }
+
   video.addEventListener("loadedmetadata", () => { drawMarkers(); renderInsights(); });
 
   video.addEventListener("timeupdate", () => {
     const t = video.currentTime;
     if (state.duration) road.querySelector(".playhead").style.setProperty("--p", Math.min(1, t / state.duration));
 
-    // Câu cảnh báo gần nhất đã phát trong CAPTION_SECONDS giây vừa qua.
+    // Câu cảnh báo gần nhất đã phát trong CAPTION_SECONDS giây vừa qua
     let current = -1;
     state.events.forEach((ev, i) => {
       if (ev.timestamp_sec <= t && t - ev.timestamp_sec < CAPTION_SECONDS) current = i;
@@ -542,12 +1013,18 @@ function setupPlayer() {
     $("events").querySelectorAll("li").forEach((r) => r.classList.toggle("active", Number(r.dataset.index) === current));
   });
 
-  // Bấm vào bất kỳ đâu trên dải đường để tua tới thời điểm tương ứng.
+  // Bấm vào bất kỳ đâu trên dải đường để tua tới thời điểm tương ứng
   road.addEventListener("click", (e) => {
     const lane = road.querySelector(".lane").getBoundingClientRect();
     if (!state.duration || e.clientX < lane.left) return;
     seekTo(((e.clientX - lane.left) / lane.width) * state.duration + 0.3);
   });
+
+  // Gắn sự kiện nút âm thanh trực tiếp
+  const liveAudioBtn = $("live-audio-btn");
+  if (liveAudioBtn) {
+    liveAudioBtn.addEventListener("click", toggleLiveAudio);
+  }
 }
 
 /* ------------------------------------------------------------------ điều hướng */

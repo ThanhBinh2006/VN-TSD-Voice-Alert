@@ -16,13 +16,16 @@ Chạy:
 
 API (JSON):
     GET  /api/health                              trạng thái server, model, nơi lưu log
-    POST /api/jobs            form-data: file, model   -> 202 {"job_id", "status"}
+    POST /api/jobs            form-data: file, model, frame_stride (tùy chọn)
+                                                 -> 202 {"job_id", "status", ...}
     GET  /api/jobs[?limit=50&offset=0]            danh sách job (mới nhất trước)
     GET  /api/jobs/<id>                           chi tiết + số liệu + link kết quả + tiến độ ("progress")
     GET  /api/jobs/<id>/detections                các detection đã ghi
     GET  /api/jobs/<id>/voice-events              các lần phát giọng nói (+ vị trí, link file âm thanh)
     GET  /api/jobs/<id>/voice-events/<eid>/audio  file âm thanh của một lần phát
     GET  /api/jobs/<id>/result[?download=1]       xem / tải video hoặc ảnh kết quả
+    GET  /api/jobs/<id>/stream                    luồng MJPEG trực tiếp của video
+    GET  /api/jobs/<id>/frame                     khung JPEG mới nhất
 
 "progress" trong mỗi job (frontend gọi lại GET /api/jobs/<id> mỗi ~1 giây để vẽ thanh tiến độ):
     {"stage": "queued" | "loading_model" | "processing" | "finalizing" | "done" | "failed",
@@ -36,8 +39,19 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from flask import Flask, abort, jsonify, render_template, request, send_file, url_for
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+    url_for,
+)
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
@@ -51,7 +65,7 @@ log = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------- khởi tạo
 
-def _make_store(kind: str, db_path: Path):
+def _make_store(kind: str, db_path: Path) -> Any:
     """kind: "auto" | "memory" | "sqlite". auto = SQLite nếu Repository của TV5 đã hiện thực, không thì RAM."""
     from app.fake import is_stub
     from ts_alert.db.repository import Repository
@@ -68,8 +82,14 @@ def _make_store(kind: str, db_path: Path):
     raise ValueError(f"store không hợp lệ: {kind!r}")
 
 
-def create_app(runtime: str = "local", fake: bool = False, store=None, store_kind: str = "auto",
-               sync: bool = False, overrides: dict | None = None) -> Flask:
+def create_app(
+    runtime: str = "local",
+    fake: bool = False,
+    store: Any = None,
+    store_kind: str = "auto",
+    sync: bool = False,
+    overrides: dict | None = None,
+) -> Flask:
     """runtime: local | kaggle | đường dẫn yaml. fake: dùng detector + hậu xử lý giả.
     store: truyền sẵn ResultStore (test); None -> tạo theo store_kind. sync: chạy job ngay (test)."""
     base_cfg = resolve_config(None, runtime, overrides)
@@ -81,6 +101,7 @@ def create_app(runtime: str = "local", fake: bool = False, store=None, store_kin
     cfg_cache: dict[str, dict] = {}
 
     def cfg_for(model_name: str) -> dict:
+        """Lấy cấu hình đã cache của model."""
         if model_name not in cfg_cache:
             cfg_cache[model_name] = resolve_config(model_name, runtime, overrides)
         return cfg_cache[model_name]
@@ -95,22 +116,31 @@ def create_app(runtime: str = "local", fake: bool = False, store=None, store_kin
         from ts_alert.pipelines import get_detector
         detector_factory = get_detector
 
-    store = store if store is not None else _make_store(store_kind, resolve_path(paths["db_path"]))
+    store = store if store is not None else _make_store(
+        store_kind, resolve_path(paths["db_path"])
+    )
     _fail_unfinished_jobs(store)
     runner = JobRunner(store, cfg_for, detector_factory, outputs_dir, sync=sync)
 
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = int(base_cfg["app"]["max_upload_mb"]) * 1024 * 1024
     app.json.ensure_ascii = False          # trả tiếng Việt có dấu thay vì \uXXXX
-    app.extensions["tsd"] = {"store": store, "runner": runner, "cfg": base_cfg, "fake": fake,
-                             "fake_parts": fake_names, "restore_fakes": restore_fakes,
-                             "outputs_dir": outputs_dir, "uploads_dir": uploads_dir}
+    app.extensions["tsd"] = {
+        "store": store,
+        "runner": runner,
+        "cfg": base_cfg,
+        "fake": fake,
+        "fake_parts": fake_names,
+        "restore_fakes": restore_fakes,
+        "outputs_dir": outputs_dir,
+        "uploads_dir": uploads_dir,
+    }
 
     _register_routes(app)
     return app
 
 
-def _fail_unfinished_jobs(store) -> None:
+def _fail_unfinished_jobs(store: Any) -> None:
     """SQLite giữ dữ liệu qua các lần chạy: job còn queued/processing lúc khởi động là job bị bỏ dở khi tắt
     server lần trước (không còn ai chạy tiếp). Đánh dấu lỗi để giao diện không chờ mãi."""
     for status in ("queued", "processing"):
@@ -122,17 +152,20 @@ def _fail_unfinished_jobs(store) -> None:
 # ----------------------------------------------------------------------------- tiện ích
 
 def _ctx() -> dict:
+    """Lấy ngữ cảnh xử lý của ứng dụng hiện tại."""
     from flask import current_app
     return current_app.extensions["tsd"]
 
 
-def _error(status: int, message: str):
+def _error(status: int, message: str) -> Response:
+    """Tạo phản hồi lỗi JSON với HTTP status tương ứng."""
     resp = jsonify({"error": message})
     resp.status_code = status
     return resp
 
 
 def _job_or_404(job_id: int) -> dict:
+    """Lấy job hoặc trả lỗi HTTP 404."""
     job = _ctx()["store"].get_job(job_id)
     if job is None:
         abort(404, description=f"Không có job {job_id}")
@@ -152,34 +185,76 @@ def _safe_output_path(path_str: str | None) -> Path:
 def _progress_json(job: dict) -> dict:
     """Tiến độ của job. Trạng thái trong store là chuẩn; tracker (RAM) bổ sung số khung / % / fps / ETA.
     Job không còn trong tracker (vd. server đã khởi động lại) vẫn trả được stage theo status."""
-    progress = _ctx()["runner"].progress.get(job["id"]) or {
-        "stage": job["status"] if job["status"] in ("queued", "done", "failed") else "processing",
-        "percent": None, "frames_done": None, "frame_count": None, "fps": None, "eta_sec": None}
+    progress = _ctx()["runner"].progress.get(job["id"])
+    if progress is None:
+        progress = {
+            "stage": (
+                job["status"]
+                if job["status"] in ("queued", "done", "failed")
+                else "processing"
+            ),
+            "percent": None,
+            "frames_done": None,
+            "frame_count": None,
+            "fps": None,
+            "eta_sec": None,
+            "video_fps": None,
+            "duration_sec": None,
+            "current_timestamp_sec": None,
+            "frame_stride": None,
+            "elapsed_ms": None,
+            "layer_time_ms": job.get("layer_time_ms"),
+            "tts_time_ms": job.get("tts_time_ms"),
+            "unique_sign_count": job.get("unique_sign_count"),
+            "voice_play_count": job.get("voice_play_count"),
+        }
+
     if job["status"] == "done":                      # store đã ghi xong -> chắc chắn 100%
         progress.update(stage="done", percent=100.0, eta_sec=None)
+        for key in (
+            "unique_sign_count",
+            "voice_play_count",
+            "layer_time_ms",
+            "tts_time_ms",
+        ):
+            if job.get(key) is not None:
+                progress[key] = job[key]
     elif job["status"] == "failed":
         progress.update(stage="failed", eta_sec=None)
     return progress
 
 
-def _epoch(value):
+def _epoch(value: str | int | float | None) -> int | float | None:
     """Thời điểm -> số giây kể từ 1970 (giao diện cần dạng này). InMemoryStore lưu sẵn dạng số;
     SQLite (CURRENT_TIMESTAMP) lưu chuỗi "YYYY-MM-DD HH:MM:SS" theo giờ UTC."""
     if value is None or isinstance(value, (int, float)):
         return value
     try:
-        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
     except ValueError:
         return None
 
 
 def _job_json(job: dict) -> dict:
+    """Chuẩn hóa job thành dữ liệu JSON cùng tiến độ và các URL liên quan."""
     data = dict(job)
     for key in ("created_at", "started_at", "finished_at"):
         if key in data:
             data[key] = _epoch(data[key])
-    data["progress"] = _progress_json(job)
+
+    progress = _progress_json(job)
+    data["progress"] = progress
+    data["frame_stride"] = progress.get("frame_stride") or int(
+        (_ctx()["cfg"].get("inference") or {}).get("frame_stride", 1)
+    )
     data["input_name"] = Path(job["input_path"]).name if job.get("input_path") else None
+
+    if job.get("input_type") == "video":
+        data["stream_url"] = url_for("job_stream", job_id=job["id"])
+        data["frame_url"] = url_for("job_frame", job_id=job["id"])
+
     if job.get("status") == "done" and job.get("output_path"):
         data["result_url"] = url_for("job_result", job_id=job["id"])
         data["download_url"] = url_for("job_result", job_id=job["id"], download=1)
@@ -189,46 +264,88 @@ def _job_json(job: dict) -> dict:
 # ----------------------------------------------------------------------------- routes
 
 def _register_routes(app: Flask) -> None:
+    """Đăng ký giao diện, API quản lý job và các endpoint media."""
 
     @app.errorhandler(HTTPException)
-    def http_error(exc: HTTPException):
+    def http_error(exc: HTTPException) -> Response | HTTPException:
+        """Trả lỗi HTTP dạng JSON cho các endpoint API."""
         if request.path.startswith("/api/"):
             return _error(exc.code or 500, exc.description or exc.name)
         return exc
 
     @app.get("/")
-    def index():
+    def index() -> str:
+        """Hiển thị giao diện chính."""
         # Giao diện: app/templates/index.html + app/static/app.css, app.js (gọi các API bên dưới).
         return render_template("index.html")
 
     @app.get("/api/health")
-    def health():
+    def health() -> Response:
+        """Trả trạng thái server, model và cấu hình mặc định."""
         ctx = _ctx()
         models = {}
         for name in MODEL_NAMES:
             weights = resolve_path(resolve_config(name, None)["model"]["weights"])
-            models[name] = {"weights": str(weights), "weights_exists": weights.exists(),
-                            "loaded": name in ctx["runner"].loaded_models()}
-        return jsonify({"status": "ok", "fake": ctx["fake"], "fake_parts": ctx["fake_parts"],
-                        "store": type(ctx["store"]).__name__, "models": models,
-                        "max_upload_mb": ctx["cfg"]["app"]["max_upload_mb"],
-                        "accept": sorted(VIDEO_EXTS | IMAGE_EXTS)})
+            models[name] = {
+                "weights": str(weights),
+                "weights_exists": weights.exists(),
+                "loaded": name in ctx["runner"].loaded_models(),
+            }
+        return jsonify({
+            "status": "ok",
+            "fake": ctx["fake"],
+            "fake_parts": ctx["fake_parts"],
+            "store": type(ctx["store"]).__name__,
+            "models": models,
+            "max_upload_mb": ctx["cfg"]["app"]["max_upload_mb"],
+            "accept": sorted(VIDEO_EXTS | IMAGE_EXTS),
+            "frame_stride": int(
+                (ctx["cfg"].get("inference") or {}).get("frame_stride", 1)
+            ),
+        })
 
     @app.post("/api/jobs")
-    def create_job():
+    def create_job() -> Response:
+        """Kiểm tra upload và frame_stride trước khi lưu file, sau đó chạy job."""
         ctx = _ctx()
         file = request.files.get("file")
         model_name = (request.form.get("model") or "").strip()
         if file is None or not file.filename:
             return _error(400, "Thiếu file (field 'file')")
         if model_name not in MODEL_NAMES:
-            return _error(400, f"Model không hợp lệ: {model_name!r}. Chọn một trong {list(MODEL_NAMES)}")
+            return _error(
+                400,
+                f"Model không hợp lệ: {model_name!r}. Chọn một trong {list(MODEL_NAMES)}",
+            )
+
         ext = Path(file.filename).suffix.lower()
         try:
             input_type = video_io.media_type(file.filename)
         except ValueError:
-            return _error(400, f"Định dạng không hỗ trợ: {ext or '(không có đuôi)'}. "
-                               f"Hỗ trợ: {', '.join(sorted(VIDEO_EXTS | IMAGE_EXTS))}")
+            return _error(
+                400,
+                f"Định dạng không hỗ trợ: {ext or '(không có đuôi)'}. "
+                f"Hỗ trợ: {', '.join(sorted(VIDEO_EXTS | IMAGE_EXTS))}",
+            )
+
+        raw_stride = (request.form.get("frame_stride") or "").strip()
+        overrides: dict[str, dict[str, int]] | None = None
+        stride_val = int(
+            (ctx["cfg"].get("inference") or {}).get("frame_stride", 1)
+        )
+        if raw_stride != "":
+            try:
+                if not raw_stride.isascii() or not raw_stride.isdecimal():
+                    raise ValueError
+                stride_val = int(raw_stride)
+                if not 1 <= stride_val <= 300:
+                    raise ValueError
+            except ValueError:
+                return _error(
+                    400,
+                    "frame_stride phải là chuỗi số nguyên dương trong khoảng [1, 300]",
+                )
+            overrides = {"inference": {"frame_stride": stride_val}}
 
         stem = secure_filename(Path(file.filename).stem) or "upload"   # bỏ dấu / ký tự lạ
         saved = ctx["uploads_dir"] / f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
@@ -237,26 +354,39 @@ def _register_routes(app: Flask) -> None:
         store = ctx["store"]
         job_id = store.create_job(input_type, str(saved), model_name)
         store.set_status(job_id, "queued")
-        ctx["runner"].submit(job_id, saved, model_name)
+        ctx["runner"].submit(job_id, saved, model_name, overrides=overrides)
         job = store.get_job(job_id)
-        resp = jsonify({"job_id": job_id, "status": job["status"],
-                        "status_url": url_for("get_job", job_id=job_id)})
+        data = {
+            "job_id": job_id,
+            "status": job["status"],
+            "status_url": url_for("get_job", job_id=job_id),
+            "frame_stride": stride_val,
+        }
+        if input_type == "video":
+            data["stream_url"] = url_for("job_stream", job_id=job_id)
+
+        resp = jsonify(data)
         resp.status_code = 202
         return resp
 
     @app.get("/api/jobs")
-    def list_jobs():
+    def list_jobs() -> Response:
+        """Liệt kê job theo phân trang."""
         limit = request.args.get("limit", default=50, type=int)
         offset = request.args.get("offset", default=0, type=int)
-        jobs = _ctx()["store"].get_jobs(limit=max(1, min(limit, 500)), offset=max(0, offset))
+        jobs = _ctx()["store"].get_jobs(
+            limit=max(1, min(limit, 500)), offset=max(0, offset)
+        )
         return jsonify([_job_json(j) for j in jobs])
 
     @app.get("/api/jobs/<int:job_id>")
-    def get_job(job_id: int):
+    def get_job(job_id: int) -> Response:
+        """Trả chi tiết và tiến độ hiện tại của job."""
         return jsonify(_job_json(_job_or_404(job_id)))
 
     @app.get("/api/jobs/<int:job_id>/detections")
-    def job_detections(job_id: int):
+    def job_detections(job_id: int) -> Response:
+        """Trả các detection của job theo DATA_CONTRACT."""
         _job_or_404(job_id)
         detections = _ctx()["store"].get_detections(job_id)
         for det in detections:              # SQLite lưu x1, y1, x2, y2 riêng -> trả thêm "bbox" như DATA_CONTRACT
@@ -265,27 +395,39 @@ def _register_routes(app: Flask) -> None:
         return jsonify(detections)
 
     @app.get("/api/jobs/<int:job_id>/voice-events")
-    def job_voice_events(job_id: int):
+    def job_voice_events(job_id: int) -> Response:
+        """Trả sự kiện giọng nói cùng vị trí và URL âm thanh."""
         _job_or_404(job_id)
         store = _ctx()["store"]
         events = store.get_voice_events(job_id)
         # Kèm vị trí (left/front/right) của detection đã kích hoạt cảnh báo để giao diện xếp đúng làn.
-        position_of = {d["id"]: d.get("position") for d in store.get_detections(job_id)} if events else {}
+        position_of = {
+            d["id"]: d.get("position") for d in store.get_detections(job_id)
+        } if events else {}
         for ev in events:
             ev["position"] = position_of.get(ev.get("detection_id"))
             ev["audio_url"] = url_for("voice_audio", job_id=job_id, event_id=ev["id"])
         return jsonify(events)
 
     @app.get("/api/jobs/<int:job_id>/voice-events/<int:event_id>/audio")
-    def voice_audio(job_id: int, event_id: int):
+    def voice_audio(job_id: int, event_id: int) -> Response:
+        """Trả file âm thanh của sự kiện thuộc job."""
         _job_or_404(job_id)
-        ev = next((e for e in _ctx()["store"].get_voice_events(job_id) if e["id"] == event_id), None)
+        ev = next(
+            (
+                e
+                for e in _ctx()["store"].get_voice_events(job_id)
+                if e["id"] == event_id
+            ),
+            None,
+        )
         if ev is None:
             abort(404, description=f"Không có voice event {event_id}")
         return send_file(_safe_output_path(ev["audio_path"]))
 
     @app.get("/api/jobs/<int:job_id>/result")
-    def job_result(job_id: int):
+    def job_result(job_id: int) -> Response:
+        """Hiển thị hoặc tải file kết quả khi job hoàn tất."""
         job = _job_or_404(job_id)
         if job["status"] != "done":
             return _error(409, f"Job đang ở trạng thái '{job['status']}', chưa có kết quả")
@@ -294,10 +436,46 @@ def _register_routes(app: Flask) -> None:
         # conditional=True (mặc định) hỗ trợ Range request -> tua được video trong trình duyệt.
         return send_file(path, as_attachment=download, download_name=path.name)
 
+    @app.get("/api/jobs/<int:job_id>/stream")
+    def job_stream(job_id: int) -> Response:
+        """Trả luồng MJPEG trực tiếp cho job video còn trong bộ đệm live."""
+        job = _job_or_404(job_id)
+        if job.get("input_type") != "video":
+            return _error(400, "Luồng live chỉ hỗ trợ job video")
+
+        runner = _ctx()["runner"]
+        if not runner.live.has_slot(job_id):
+            return _error(404, "Luồng live không khả dụng")
+
+        return Response(
+            stream_with_context(runner.live.iter_mjpeg(job_id)),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/jobs/<int:job_id>/frame")
+    def job_frame(job_id: int) -> Response:
+        """Trả JPEG mới nhất của job hoặc HTTP 404 nếu chưa có frame."""
+        _job_or_404(job_id)
+        jpeg = _ctx()["runner"].live.latest_frame(job_id)
+        if jpeg is None:
+            abort(404, description="Chưa có khung hình")
+
+        return Response(
+            jpeg,
+            mimetype="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+
 
 # ----------------------------------------------------------------------------- chạy
 
 def main() -> None:
+    """Khởi chạy server và đóng worker cùng các luồng MJPEG khi server dừng."""
     parser = argparse.ArgumentParser(description="Web TSD Voice Alert (localhost)")
     parser.add_argument("--runtime", default="local", help="local | kaggle | đường dẫn yaml")
     parser.add_argument("--fake", action="store_true", help="detector + hậu xử lý giả để demo")
@@ -311,8 +489,16 @@ def main() -> None:
     app = create_app(runtime=args.runtime, fake=args.fake, store_kind=args.store)
     app_cfg = app.extensions["tsd"]["cfg"]["app"]
     # use_reloader=False: reloader chạy app 2 lần -> 2 worker, nạp model 2 lần.
-    app.run(host=args.host or app_cfg["host"], port=args.port or app_cfg["port"],
-            debug=args.debug, use_reloader=False, threaded=True)
+    try:
+        app.run(
+            host=args.host or app_cfg["host"],
+            port=args.port or app_cfg["port"],
+            debug=args.debug,
+            use_reloader=False,
+            threaded=True,
+        )
+    finally:
+        app.extensions["tsd"]["runner"].shutdown(wait=False)
 
 
 if __name__ == "__main__":
