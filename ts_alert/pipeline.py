@@ -8,6 +8,7 @@ Nơi lưu log là `repo` (giao diện ResultStore trong ts_alert/db/interface.py
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -52,6 +53,32 @@ def _resolve_frame_stride(cfg: dict) -> int:
         raise ValueError("inference.frame_stride phải >= 1")
 
     return frame_stride
+
+
+def _build_speech_text(label: str, pos: str, classes: dict, cfg: dict) -> str:
+    """Truyền cfg khi chữ ký hỗ trợ, tương thích với hàm chỉ nhận ba đối số."""
+    try:
+        parameters = tuple(
+            inspect.signature(tts.build_speech_text).parameters.values()
+        )
+    except (ValueError, TypeError):
+        return tts.build_speech_text(label, pos, classes)
+
+    positional_kinds = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+    for parameter in parameters:
+        if parameter.name == "cfg":
+            if parameter.kind == inspect.Parameter.KEYWORD_ONLY:
+                return tts.build_speech_text(label, pos, classes, cfg=cfg)
+            if parameter.kind in positional_kinds:
+                return tts.build_speech_text(label, pos, classes, cfg)
+
+    if len(parameters) >= 4 and parameters[3].kind in positional_kinds:
+        return tts.build_speech_text(label, pos, classes, cfg)
+
+    return tts.build_speech_text(label, pos, classes)
 
 
 def process_media(
@@ -146,8 +173,8 @@ def process_media(
                 layer_ms += _ms(t0)
 
                 for event in frame_events:
-                    text = tts.build_speech_text(
-                        event["label"], event["position"], classes
+                    text = _build_speech_text(
+                        event["label"], event["position"], classes, cfg
                     )
                     audio_path = (
                         audio_dir / f"{stem}_{len(audio_events):03d}.mp3"
