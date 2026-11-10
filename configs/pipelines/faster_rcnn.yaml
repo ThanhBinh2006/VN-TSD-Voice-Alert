@@ -21,7 +21,7 @@ train:
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
-  enabled: false
+  enabled: True
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
   # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true; ColorJitter + che khuất một phần)
   hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 0.5)

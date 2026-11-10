@@ -72,7 +72,7 @@ sweep:                          # Tham số mặc định cho W&B Sweep (tools.r
   metric:
     name: best/metric
     goal: maximize
-  count: 20                     # Số lần thử mặc định mỗi lần chạy sweep
+  count: 5                     # Số lần thử mặc định mỗi lần chạy sweep
   early_terminate:
     type: hyperband
     min_iter: 5
