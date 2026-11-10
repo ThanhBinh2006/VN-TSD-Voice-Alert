@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -30,14 +31,39 @@ class YoloDetector(BaseDetector):
         self.model = load_model(weights)
         self.classes = load_classes(resolve_path(cfg["paths"]["classes_csv"]))
 
-    def predict(self, frame: NDArray[np.uint8] | None) -> list[Detection]:
-        """Trả về các phát hiện; ảnh không tồn tại hoặc rỗng trả về []."""
+    def predict(
+        self,
+        frame: NDArray[np.uint8] | None,
+        conf_threshold: float | None = None,
+    ) -> list[Detection]:
+        """Trả về các phát hiện; ảnh không tồn tại hoặc rỗng trả về [].
+
+        Dùng self.conf khi conf_threshold là None.
+        Raise ValueError nếu ngưỡng truyền vào không phải float trong [0.0, 1.0].
+        """
+        threshold = self.conf
+        if conf_threshold is not None:
+            if isinstance(conf_threshold, (bool, np.bool_)):
+                raise ValueError("conf_threshold không được là bool.")
+
+            try:
+                threshold = float(conf_threshold)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "conf_threshold phải là số hữu hạn trong khoảng [0, 1]."
+                ) from exc
+
+            if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+                raise ValueError(
+                    "conf_threshold phải là số hữu hạn trong khoảng [0, 1]."
+                )
+
         if frame is None or frame.size == 0:
             return []
 
         results = self.model.predict(
             source=frame,
-            conf=self.conf,
+            conf=threshold,
             iou=self.iou,
             imgsz=self.img_size,
             verbose=False,

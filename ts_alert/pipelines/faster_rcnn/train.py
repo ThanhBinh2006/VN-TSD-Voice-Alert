@@ -34,7 +34,7 @@ from ts_alert.pipelines.faster_rcnn.model import build_model
 from ts_alert.runtime.batch import per_rank_batch
 from ts_alert.runtime.run_dir import make_run_dir
 from ts_alert.types import IMAGE_EXTS
-from ts_alert.utils.io import write_json, write_yaml
+from ts_alert.utils.io import read_json, write_json, write_yaml
 from ts_alert.utils.seed import set_seed
 
 TensorDict = dict[str, torch.Tensor]
@@ -908,19 +908,40 @@ class FasterRCNNPipeline(BasePipeline):
             assert run_dir is not None
             if rank == 0:
                 test_metrics: dict[str, Any] | None = None
+                val_metrics: dict[str, Any] | None = None
                 if cfg.get("eval", {}).get("auto_eval_test", False):
                     test_metrics = self.evaluate(run_dir)
-                    summary["test_metrics"] = test_metrics
-                    write_json(
-                        summary,
-                        run_dir / "summary.json",
-                    )
+                    val_metrics_path = run_dir / "metrics_val.json"
+                    if val_metrics_path.is_file():
+                        loaded_val = read_json(val_metrics_path)
+                        if not isinstance(loaded_val, Mapping):
+                            raise ValueError("metrics_val.json phải chứa một mapping.")
+                        val_metrics = {
+                            key: value
+                            for key, value in loaded_val.items()
+                            if key != "pipeline"
+                        }
+
+                summary.update({
+                    "best_conf_threshold": (
+                        test_metrics.get("conf_threshold")
+                        if isinstance(test_metrics, Mapping)
+                        else None
+                    ),
+                    "test_metrics": test_metrics,
+                    "val_metrics": val_metrics,
+                })
+                write_json(
+                    summary,
+                    run_dir / "summary.json",
+                )
 
                 log_final_to_wandb(
                     wandb_run,
                     run_dir,
                     test_metrics=test_metrics,
                     cm_json_path=run_dir / "confusion_matrix.json",
+                    val_metrics=val_metrics,
                 )
 
             return run_dir

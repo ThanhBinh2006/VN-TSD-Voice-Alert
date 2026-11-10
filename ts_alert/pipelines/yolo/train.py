@@ -12,20 +12,26 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from ultralytics.data.augment import BaseTransform, Format
 from ultralytics.data.build import get_split_fraction
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
-from ultralytics.utils import colorstr
+from ultralytics.utils import colorstr, ops
 from ultralytics.utils.instance import Bboxes
 from ultralytics.utils.torch_utils import unwrap_model
 
-from ts_alert.config.resolve import get_processed_root, resolve_path
+from ts_alert.config.resolve import (
+    get_num_classes,
+    get_processed_root,
+    resolve_path,
+)
 from ts_alert.data.preprocess_online import (
     apply_partial_occlusion_to_boxes,
     build_online_transforms,
     get_online_occlusion_config,
 )
+from ts_alert.eval.metrics import compute_metrics
 from ts_alert.pipelines.base import BasePipeline
 from ts_alert.pipelines.tracking import (
     apply_sweep_overrides,
@@ -137,6 +143,253 @@ def _open_wandb_run(
     if isinstance(result, tuple) and len(result) == 2:
         return result[0], bool(result[1])
     return result, result is not None and previous is None
+
+
+def _attach_shared_validator(
+    validator: Any,
+    cfg: Mapping[str, Any],
+) -> None:
+    """Bọc validator để dùng metric chung và khử ảnh trùng khi chạy DDP.
+
+    Dữ liệu thu thập chỉ chứa kiểu Python, không giữ tensor trên GPU.
+    Các wrapper được gắn sau khi worker khởi tạo, không tham gia pickle
+    callback từ tiến trình cha.
+    """
+    if validator is None or getattr(validator, "_ts_alert_wrapped", False):
+        return
+
+    method_names = (
+        "init_metrics",
+        "update_metrics",
+        "gather_stats",
+        "get_stats",
+    )
+    methods = {
+        name: getattr(validator, name, None)
+        for name in method_names
+    }
+    if not all(callable(method) for method in methods.values()):
+        return
+
+    num_classes = get_num_classes(dict(cfg))
+    if num_classes <= 0:
+        raise ValueError("num_classes phải lớn hơn 0.")
+
+    inference = cfg.get("inference") or {}
+    eval_iou = float(inference.get("iou_threshold", 0.50))
+    eval_conf = float(inference.get("conf_threshold", 0.25))
+    if not math.isfinite(eval_iou) or not 0.0 <= eval_iou <= 1.0:
+        raise ValueError("inference.iou_threshold phải thuộc [0, 1].")
+    if not math.isfinite(eval_conf) or not 0.0 <= eval_conf <= 1.0:
+        raise ValueError("inference.conf_threshold phải thuộc [0, 1].")
+
+    primary = str(
+        (cfg.get("train") or {}).get("primary_metric", "mAP50-95")
+    )
+    orig_init_metrics = methods["init_metrics"]
+    orig_update_metrics = methods["update_metrics"]
+    orig_gather_stats = methods["gather_stats"]
+    orig_get_stats = methods["get_stats"]
+
+    def prepare_items(
+        boxes: torch.Tensor,
+        labels: torch.Tensor,
+        pbatch: Mapping[str, Any],
+        scores: torch.Tensor | None = None,
+    ) -> list[dict[str, Any]]:
+        """Scale bản sao bbox về ảnh gốc và chuẩn hóa từng đối tượng."""
+        scaled_boxes = boxes.detach().clone().to(dtype=torch.float32)
+        if scaled_boxes.numel() > 0:
+            scaled_boxes = ops.scale_boxes(
+                pbatch["imgsz"],
+                scaled_boxes,
+                pbatch["ori_shape"],
+                pbatch["ratio_pad"],
+            )
+
+        box_values = scaled_boxes.cpu().reshape(-1, 4).numpy()
+        label_values = labels.detach().cpu().reshape(-1).tolist()
+        score_values = (
+            scores.detach().cpu().reshape(-1).tolist()
+            if scores is not None
+            else None
+        )
+
+        if len(box_values) != len(label_values):
+            raise ValueError("Số bbox và class_id phải bằng nhau.")
+        if score_values is not None and len(score_values) != len(box_values):
+            raise ValueError("Số bbox và confidence phải bằng nhau.")
+
+        ori_height, ori_width = (
+            int(pbatch["ori_shape"][0]),
+            int(pbatch["ori_shape"][1]),
+        )
+        items: list[dict[str, Any]] = []
+
+        for index, (box, raw_label) in enumerate(
+            zip(box_values, label_values)
+        ):
+            label = float(raw_label)
+            if (
+                not math.isfinite(label)
+                or not label.is_integer()
+                or not 0 <= label < num_classes
+                or not np.isfinite(box).all()
+            ):
+                continue
+
+            x1 = float(np.clip(box[0], 0.0, ori_width))
+            y1 = float(np.clip(box[1], 0.0, ori_height))
+            x2 = max(x1, float(np.clip(box[2], 0.0, ori_width)))
+            y2 = max(y1, float(np.clip(box[3], 0.0, ori_height)))
+
+            item: dict[str, Any] = {
+                "bbox": [x1, y1, x2, y2],
+                "class_id": int(label),
+            }
+            if score_values is not None:
+                score = float(score_values[index])
+                if math.isnan(score):
+                    score = 0.0
+                item["confidence"] = min(1.0, max(0.0, score))
+            items.append(item)
+
+        return items
+
+    def init_metrics(*args: Any, **kwargs: Any) -> Any:
+        """Khởi tạo metric gốc rồi reset dữ liệu của lượt validation."""
+        result = orig_init_metrics(*args, **kwargs)
+        validator._ts_shared_records = []
+        for name in ("_ts_shared_preds", "_ts_shared_gts"):
+            if hasattr(validator, name):
+                delattr(validator, name)
+        return result
+
+    def update_metrics(
+        preds: list[dict[str, torch.Tensor]],
+        batch: dict[str, Any],
+    ) -> Any:
+        """Cập nhật metric gốc và thu thập prediction/GT theo từng ảnh."""
+        result = orig_update_metrics(preds, batch)
+        records = getattr(validator, "_ts_shared_records", None)
+        if records is None:
+            records = []
+            validator._ts_shared_records = records
+
+        for si, pred in enumerate(preds):
+            pbatch = validator._prepare_batch(si, batch)
+            pred_items = prepare_items(
+                pred["bboxes"],
+                pred["cls"],
+                pbatch,
+                pred["conf"],
+            )
+            gt_items = prepare_items(
+                pbatch["bboxes"],
+                pbatch["cls"],
+                pbatch,
+            )
+            records.append(
+                (str(pbatch["im_file"]), pred_items, gt_items)
+            )
+
+        return result
+
+    def gather_stats(*args: Any, **kwargs: Any) -> Any:
+        """Gom dữ liệu mọi rank và loại ảnh lặp do DDP padding."""
+        result = orig_gather_stats(*args, **kwargs)
+        records = getattr(validator, "_ts_shared_records", [])
+
+        distributed = (
+            dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+        )
+        if distributed:
+            rank = dist.get_rank()
+            gathered: list[Any] | None = (
+                [None] * dist.get_world_size()
+                if rank == 0
+                else None
+            )
+            dist.gather_object(records, gathered, dst=0)
+        else:
+            rank = 0
+            gathered = [records]
+
+        try:
+            if rank == 0:
+                unique_records: dict[
+                    str,
+                    tuple[list[dict[str, Any]], list[dict[str, Any]]],
+                ] = {}
+                for rank_records in gathered or []:
+                    for im_file, pred_items, gt_items in rank_records or []:
+                        unique_records.setdefault(
+                            im_file,
+                            (pred_items, gt_items),
+                        )
+
+                validator._ts_shared_preds = [
+                    pred_items
+                    for pred_items, _ in unique_records.values()
+                ]
+                validator._ts_shared_gts = [
+                    gt_items
+                    for _, gt_items in unique_records.values()
+                ]
+        finally:
+            if hasattr(validator, "_ts_shared_records"):
+                delattr(validator, "_ts_shared_records")
+
+        return result
+
+    def get_stats(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Bổ sung metric chung và fitness dùng để chọn checkpoint tốt nhất."""
+        stats = orig_get_stats(*args, **kwargs)
+        if not (
+            hasattr(validator, "_ts_shared_preds")
+            and hasattr(validator, "_ts_shared_gts")
+        ):
+            return stats
+
+        try:
+            shared = compute_metrics(
+                validator._ts_shared_preds,
+                validator._ts_shared_gts,
+                num_classes,
+                iou_threshold=eval_iou,
+                conf_threshold=eval_conf,
+            )
+        finally:
+            for name in ("_ts_shared_preds", "_ts_shared_gts"):
+                if hasattr(validator, name):
+                    delattr(validator, name)
+
+        stats.update(
+            {
+                f"ts_alert/{name}": float(shared[name])
+                for name in (
+                    "mAP50-95",
+                    "mAP50",
+                    "mAP75",
+                    "AR100",
+                    "precision",
+                    "recall",
+                    "f1",
+                )
+            }
+        )
+        if primary != "neg_loss" and primary in shared:
+            stats["fitness"] = float(shared[primary])
+
+        return stats
+
+    validator.init_metrics = init_metrics
+    validator.update_metrics = update_metrics
+    validator.gather_stats = gather_stats
+    validator.get_stats = get_stats
+    validator._ts_alert_wrapped = True
 
 
 class YoloOcclusionTransform(BaseTransform):
@@ -323,7 +576,11 @@ class _YoloTrackingHook:
         self._ended = False
 
     def on_train_start(self, trainer: Any) -> None:
-        """Khởi tạo hoặc tiếp tục W&B run trên rank chính."""
+        """Gắn metric trên mọi rank và khởi tạo W&B trên rank chính."""
+        _attach_shared_validator(
+            getattr(trainer, "validator", None),
+            self.cfg,
+        )
         if not _is_main_process():
             return
 
@@ -343,11 +600,21 @@ class _YoloTrackingHook:
             self.wandb_run_id = str(self._wandb_run.id)
 
     def on_fit_epoch_end(self, trainer: Any) -> None:
-        """Ghi JSON và W&B theo epoch, giữ nguyên CSV của Ultralytics."""
+        """Ghi metric chung theo epoch và bỏ callback từ final_eval."""
         if not _is_main_process():
             return
 
+        validator = getattr(trainer, "validator", None)
+        if getattr(validator, "training", None) is False:
+            return
+
         epoch = int(trainer.epoch) + 1
+        total_epochs = int(
+            (self.cfg.get("train") or {}).get("epochs", 0)
+        )
+        if total_epochs > 0 and epoch > total_epochs:
+            return
+
         # final_eval có thể gọi lại callback của epoch đã ghi.
         if any(int(row["epoch"]) == epoch for row in self.history):
             return
@@ -357,26 +624,39 @@ class _YoloTrackingHook:
         raw_losses = getattr(trainer, "tloss", None)
         train_losses = _loss_values(raw_losses)
 
-        precision = _number(raw_metrics.get("metrics/precision(B)"))
-        recall = _number(raw_metrics.get("metrics/recall(B)"))
-        metrics: dict[str, float] = {
-            "mAP50": _number(raw_metrics.get("metrics/mAP50(B)")),
-            "mAP50-95": _number(raw_metrics.get("metrics/mAP50-95(B)")),
-            "precision": precision,
-            "recall": recall,
-            "f1": (
-                2.0 * precision * recall / (precision + recall)
-                if precision + recall > 0.0
-                else 0.0
-            ),
-        }
+        if "ts_alert/mAP50-95" in raw_metrics:
+            metrics: dict[str, float] = {
+                name: _number(raw_metrics.get(f"ts_alert/{name}"))
+                for name in (
+                    "mAP50-95",
+                    "mAP50",
+                    "mAP75",
+                    "AR100",
+                    "precision",
+                    "recall",
+                    "f1",
+                )
+            }
+        else:
+            precision = _number(raw_metrics.get("metrics/precision(B)"))
+            recall = _number(raw_metrics.get("metrics/recall(B)"))
+            metrics = {
+                "mAP50": _number(raw_metrics.get("metrics/mAP50(B)")),
+                "mAP50-95": _number(raw_metrics.get("metrics/mAP50-95(B)")),
+                "precision": precision,
+                "recall": recall,
+                "f1": (
+                    2.0 * precision * recall / (precision + recall)
+                    if precision + recall > 0.0
+                    else 0.0
+                ),
+            }
 
-        validator = getattr(trainer, "validator", None)
-        validator_metrics = getattr(validator, "metrics", None)
-        box_metrics = getattr(validator_metrics, "box", None)
-        map75 = getattr(box_metrics, "map75", None)
-        if map75 is not None:
-            metrics["mAP75"] = _number(map75)
+            validator_metrics = getattr(validator, "metrics", None)
+            box_metrics = getattr(validator_metrics, "box", None)
+            map75 = getattr(box_metrics, "map75", None)
+            if map75 is not None:
+                metrics["mAP75"] = _number(map75)
 
         train_cfg = self.cfg.get("train") or {}
         learning_rates = getattr(trainer, "lr", {}) or {}
@@ -429,8 +709,7 @@ class _YoloTrackingHook:
 
         line = format_epoch_line(
             payload,
-            total_epochs=int((self.cfg.get("train") or {}).get("epochs", 0))
-            or None,
+            total_epochs=total_epochs or None,
             primary_metric=primary,
         )
         print(line, flush=True)
@@ -456,8 +735,12 @@ class _YoloTrackingHook:
     def save_artifacts(
         self,
         test_metrics: dict[str, Any] | None = None,
+        val_metrics: Mapping[str, Any] | None = None,
+        *,
+        best_checkpoint: Path | None = None,
+        weights: Path | None = None,
     ) -> None:
-        """Lưu CSV chuẩn hóa, biểu đồ và summary sau huấn luyện."""
+        """Lưu lịch sử, biểu đồ và summary theo schema chung hai pipeline."""
         if not _is_main_process():
             return
 
@@ -474,16 +757,65 @@ class _YoloTrackingHook:
                 primary_metric=primary,
             )
 
+        summary_path = run_dir / "summary.json"
+        previous: dict[str, Any] = {}
+        if summary_path.is_file():
+            loaded = read_json(summary_path)
+            if not isinstance(loaded, Mapping):
+                raise ValueError("summary.json phải chứa một mapping.")
+            previous = dict(loaded)
+
+        if test_metrics is None:
+            test_metrics = previous.get("test_metrics")
+
+        if val_metrics is None:
+            val_path = run_dir / "metrics_val.json"
+            if val_path.is_file():
+                loaded_val = read_json(val_path)
+                if not isinstance(loaded_val, Mapping):
+                    raise ValueError("metrics_val.json phải chứa một mapping.")
+                val_metrics = {
+                    key: value
+                    for key, value in loaded_val.items()
+                    if key != "pipeline"
+                }
+            else:
+                val_metrics = previous.get("val_metrics")
+
+        checkpoint_value = previous.get("best_checkpoint")
+        if best_checkpoint is not None:
+            checkpoint_value = str(best_checkpoint)
+        elif checkpoint_value is None:
+            checkpoint_path = run_dir / "weights" / "best.pt"
+            if checkpoint_path.is_file():
+                checkpoint_value = str(checkpoint_path)
+
+        weights_value = previous.get("weights")
+        if weights is not None:
+            weights_value = str(weights)
+        elif weights_value is None:
+            configured_weights = (self.cfg.get("model") or {}).get("weights")
+            if configured_weights is not None:
+                weights_value = str(resolve_path(configured_weights))
+
+        best_conf_threshold = previous.get("best_conf_threshold")
+        if test_metrics is not None and "conf_threshold" in test_metrics:
+            best_conf_threshold = test_metrics["conf_threshold"]
+
         summary: dict[str, Any] = {
             "pipeline": "yolo",
             "primary_metric": primary,
-            "best_metric": self.best_metric,
             "best_epoch": self.best_epoch,
+            "best_metric": self.best_metric,
             "epochs_completed": len(self.history),
+            "best_checkpoint": checkpoint_value,
+            "weights": weights_value,
             "wandb_run_id": self.wandb_run_id,
+            "best_conf_threshold": best_conf_threshold,
             "test_metrics": test_metrics,
+            "val_metrics": dict(val_metrics) if val_metrics is not None else None,
         }
-        write_json(summary, run_dir / "summary.json")
+        write_json(summary, summary_path)
 
     def on_train_end(self, trainer: Any) -> None:
         """Hoàn tất artifact và đóng W&B run thuộc DDP child."""
@@ -703,6 +1035,12 @@ class YoloPipeline(BasePipeline):
             if best_checkpoint.resolve() != target_weights.resolve():
                 shutil.copy2(best_checkpoint, target_weights)
 
+            # Ghi đường dẫn trước evaluate để BasePipeline cập nhật summary.
+            hook.save_artifacts(
+                best_checkpoint=best_checkpoint,
+                weights=target_weights,
+            )
+
             test_metrics: dict[str, Any] | None = None
             if (cfg.get("eval") or {}).get("auto_eval_test", False):
                 evaluation_cfg = self.cfg
@@ -723,6 +1061,18 @@ class YoloPipeline(BasePipeline):
                     )
                 finally:
                     self.cfg = evaluation_cfg
+
+            val_metrics: dict[str, Any] | None = None
+            val_path = run_dir / "metrics_val.json"
+            if val_path.is_file():
+                loaded_val = read_json(val_path)
+                if not isinstance(loaded_val, Mapping):
+                    raise ValueError("metrics_val.json phải chứa một mapping.")
+                val_metrics = {
+                    key: value
+                    for key, value in loaded_val.items()
+                    if key != "pipeline"
+                }
 
             # Chỉ bổ sung alias dự đoán; giữ nguyên schema của evaluator.
             confusion_path = run_dir / "confusion_matrix.json"
@@ -749,26 +1099,19 @@ class YoloPipeline(BasePipeline):
 
             if wandb_run is not None:
                 hook.wandb_run_id = str(wandb_run.id)
-            hook.save_artifacts(test_metrics)
 
-            extra_plots = [
-                run_dir / filename
-                for filename in (
-                    "results.png",
-                    "BoxPR_curve.png",
-                    "PR_curve.png",
-                    "BoxF1_curve.png",
-                    "F1_curve.png",
-                    "confusion_matrix_normalized.png",
-                )
-                if (run_dir / filename).is_file()
-            ]
+            hook.save_artifacts(
+                test_metrics,
+                val_metrics,
+                best_checkpoint=best_checkpoint,
+                weights=target_weights,
+            )
             log_final_to_wandb(
                 wandb_run,
                 run_dir,
                 test_metrics,
                 confusion_path,
-                extra_plots=extra_plots,
+                val_metrics=val_metrics,
             )
             return run_dir
         finally:

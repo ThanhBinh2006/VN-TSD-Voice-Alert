@@ -517,7 +517,7 @@ def plot_training_curves(
     best_epoch: int | None = None,
     primary_metric: str = "mAP50-95",
 ) -> Path | None:
-    """Vẽ loss, mAP, precision/recall/F1 và learning rate."""
+    """Vẽ bốn nhóm thống kê và đánh dấu epoch có metric tốt nhất."""
     if not _is_main_process():
         return None
 
@@ -548,9 +548,14 @@ def plot_training_curves(
             ),
             (
                 axes[0, 1],
-                "Validation mAP",
-                ("val/mAP50", "val/mAP50-95"),
-                "mAP",
+                "Validation Detection Metrics",
+                (
+                    "val/mAP50-95",
+                    "val/mAP50",
+                    "val/mAP75",
+                    "val/AR100",
+                ),
+                "Score",
             ),
             (
                 axes[1, 0],
@@ -561,23 +566,42 @@ def plot_training_curves(
             (
                 axes[1, 1],
                 "Learning Rate",
-                ("lr", "system/learning_rate"),
+                ("system/learning_rate",),
                 "Learning rate",
             ),
         )
+        optional_metrics = {"val/mAP75", "val/AR100"}
+        line_styles = ("-", "--", "-.", ":")
+
         for axis, title, keys, ylabel in groups:
             for index, key in enumerate(keys):
                 values = [
-                    _number(row.get(key), default=math.nan)
+                    _number(
+                        (
+                            row.get("lr")
+                            if row.get("system/learning_rate") is None
+                            else row.get("system/learning_rate")
+                        )
+                        if key == "system/learning_rate"
+                        else row.get(key),
+                        default=math.nan,
+                    )
                     for row in rows
                 ]
+                if key in optional_metrics and not any(
+                    math.isfinite(value) for value in values
+                ):
+                    continue
+
                 axis.plot(
                     epochs,
                     values,
                     label=key,
                     marker=marker,
-                    linestyle="-" if index == 0 else "--",
+                    linestyle=line_styles[index % len(line_styles)],
+                    linewidth=2.0 if key == "system/learning_rate" else 1.5,
                 )
+
             axis.set_title(title)
             axis.set_xlabel("Epoch")
             axis.set_ylabel(ylabel)
@@ -586,11 +610,12 @@ def plot_training_curves(
 
         if best_epoch is not None:
             axis = axes[0, 1]
+            best_index = int(best_epoch)
             axis.axvline(
-                int(best_epoch), color="red", linestyle="--", alpha=0.7
+                best_index, color="red", linestyle="--", alpha=0.7
             )
             best = next(
-                (row for row in rows if row["epoch"] == int(best_epoch)),
+                (row for row in rows if row["epoch"] == best_index),
                 None,
             )
             if best is not None:
@@ -600,7 +625,7 @@ def plot_training_curves(
                 )
                 if math.isfinite(value):
                     axis.plot(
-                        [int(best_epoch)],
+                        [best_index],
                         [value],
                         marker="*",
                         markersize=16,
@@ -697,8 +722,9 @@ def log_final_to_wandb(
     test_metrics: dict | None = None,
     cm_json_path: Path | None = None,
     extra_plots: list[Path] | None = None,
+    val_metrics: Mapping[str, Any] | None = None,
 ) -> None:
-    """Ghi kết quả test và tải biểu đồ cuối cùng lên W&B."""
+    """Ghi metric test, validation cuối cùng và biểu đồ lên W&B."""
     if wandb_run is None or not _is_main_process():
         return
 
@@ -714,6 +740,29 @@ def log_final_to_wandb(
         except Exception:
             _warn("Không thể ghi kết quả test lên W&B.")
 
+    if val_metrics:
+        final_metrics = {
+            str(key)
+            if str(key).startswith("val_final/")
+            else f"val_final/{key}": _jsonable(value)
+            for key, value in val_metrics.items()
+        }
+        final_summary = dict(final_metrics)
+        if test_metrics is not None and "conf_threshold" in test_metrics:
+            final_summary["eval/best_conf_threshold"] = _jsonable(
+                test_metrics["conf_threshold"]
+            )
+
+        try:
+            wandb_run.summary.update(final_summary)
+        except Exception:
+            _warn("Không thể cập nhật kết quả validation cuối cùng trên W&B.")
+
+        try:
+            wandb_run.log(final_metrics)
+        except Exception:
+            _warn("Không thể ghi kết quả validation cuối cùng lên W&B.")
+
     try:
         wandb = importlib.import_module("wandb")
     except Exception:
@@ -723,16 +772,24 @@ def log_final_to_wandb(
     directory = Path(run_dir)
     plots = [
         directory / "training_curves.png",
+        directory / "pr_curve.png",
+        directory / "eval_comparison.png",
         directory / "confusion_matrix.png",
+        directory / "confusion_matrix_test.png",
+        directory / "confusion_matrix_val.png",
         *(Path(path) for path in (extra_plots or [])),
     ]
     charts: dict[str, Any] = {}
     visited: set[Path] = set()
+
     for path in plots:
-        if path in visited or not path.is_file():
+        if not path.is_file():
             continue
-        visited.add(path)
         try:
+            identity = path.resolve()
+            if identity in visited:
+                continue
+            visited.add(identity)
             charts[f"charts/{path.stem}"] = wandb.Image(str(path))
         except Exception:
             _warn("Không thể chuẩn bị một ảnh biểu đồ cho W&B.")
