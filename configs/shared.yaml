@@ -19,7 +19,7 @@ train:
   # YOLO truyền nguyên tổng để Ultralytics tự chia GPU.
   batch_size: 32
   epochs: 100                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
-  early_stopping_patience: 10   # early stopping (epoch)
+  early_stopping_patience: 15   # early stopping (epoch)
   amp: true                     # mixed precision
   primary_metric: mAP50-95
   run_name: null                # tên run; null = lấy tên pipeline. Notebook tự sinh: {pipeline}_s{seed}_ep{epochs}_bs{batch}[_online]_{hash8}
@@ -72,7 +72,7 @@ sweep:                          # Tham số mặc định cho W&B Sweep (tools.r
   metric:
     name: best/metric
     goal: maximize
-  count: 10                     # Số lần thử mặc định mỗi lần chạy sweep
+  count: 20                     # Số lần thử mặc định mỗi lần chạy sweep
   early_terminate:
     type: hyperband
     min_iter: 5

@@ -20,7 +20,7 @@ train:
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
-  enabled: false
+  enabled: true
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
   # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
   mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation
@@ -35,12 +35,12 @@ online_preprocess:
 
 sweep:                          # Không gian tìm kiếm siêu tham số (tuân thủ không ghi đè shared.yaml)
   parameters:
-    # train.lr:
-    #   distribution: log_uniform_values
-    #   min: 0.002
-    #   max: 0.02
+    train.lr:
+      distribution: log_uniform_values
+      min: 0.0001
+      max: 0.02
     train.optimizer:
-      values: [SGD, AdamW, auto]
+      values: [SGD, AdamW]
     # train.momentum:
     #   distribution: uniform
     #   min: 0.9
@@ -59,3 +59,4 @@ sweep:                          # Không gian tìm kiếm siêu tham số (tuân
     #   values: [0.0, 0.3, 0.5]
     # online_preprocess.occlusion_ratio:
     #   values: [0.2, 0.3, 0.45]
+

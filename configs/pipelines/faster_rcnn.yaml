@@ -32,12 +32,12 @@ online_preprocess:
 
 sweep:                          # Không gian tìm kiếm siêu tham số (tuân thủ không ghi đè shared.yaml)
   parameters:
-    # train.lr:
-    #   distribution: log_uniform_values
-    #   min: 0.001
-    #   max: 0.01
+    train.lr:
+      distribution: log_uniform_values
+      min: 0.0001
+      max: 0.02
     train.optimizer:
-      values: [SGD, AdamW, auto]
+      values: [SGD, AdamW]
     # train.momentum:
     #   distribution: uniform
     #   min: 0.9
