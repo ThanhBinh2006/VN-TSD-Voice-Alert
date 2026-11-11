@@ -117,3 +117,36 @@ def test_image_upload_without_stream_url(client) -> None:
     assert job["status"] == "done"
     assert "stream_url" not in job
     assert client.get(job["result_url"]).status_code == 200
+
+
+def test_realtime_tts_controls_and_health_config(client) -> None:
+    """Kiểm tra điều khiển TTS, logic JavaScript và cấu hình health mặc định."""
+    page = client.get("/")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    for element_id in (
+        "live-cutoff-btn",
+        "live-speed-select",
+        "camera-cutoff-btn",
+        "camera-speed-select",
+    ):
+        assert f'id="{element_id}"' in html
+    for speed in ("1.0", "1.4", "1.8"):
+        assert f'<option value="{speed}"' in html
+
+    response = client.get("/static/app.js")
+    assert response.status_code == 200
+    source = response.get_data(as_text=True)
+    for token in ("playbackRate", "preservesPitch", "track_lost", "cutoffOnPass"):
+        assert token in source
+
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    health = response.get_json()
+    assert health["realtime"]["tts"] == {
+        "playback_rate": 1.4,
+        "compact": True,
+        "cutoff_on_pass": True,
+        "cutoff_grace_sec": 0.25,
+        "cache_enabled": True,
+    }

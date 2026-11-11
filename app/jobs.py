@@ -22,6 +22,7 @@ import numpy as np
 from ts_alert.config.resolve import deep_merge
 from ts_alert.pipeline import _resolve_frame_stride, process_media
 from ts_alert.runtime import video_io
+from ts_alert.runtime.scheduler import CancellationToken
 
 log = logging.getLogger(__name__)
 
@@ -460,6 +461,10 @@ class JobRunner:
         self.live = LiveFrameBuffer()
         self._detectors: dict[str, Any] = {}
         self._detector_lock = threading.Lock()
+        self._jobs_lock = threading.RLock()
+        self._cancel_tokens: dict[int, CancellationToken] = {}
+        self._futures: dict[int, Future[None]] = {}
+        self._shutting_down = False
         self._pool = (
             None
             if sync
@@ -487,26 +492,93 @@ class JobRunner:
         input_path: Path,
         model_name: str,
         overrides: dict[str, Any] | None = None,
+        *,
+        render_video: bool = True,
     ) -> Future[None] | None:
-        """Xếp job vào worker với bản sao overrides riêng."""
+        """Xếp job vào worker với overrides riêng và token hủy độc lập."""
         job_overrides = deepcopy(overrides) if overrides is not None else None
-        self.progress.queued(job_id)
-        try:
-            if video_io.media_type(input_path) == "video":
-                self.live.init_job(job_id)
-        except Exception:
-            pass
 
-        if self.sync:
-            self._run(job_id, Path(input_path), model_name, job_overrides)
-            return None
+        with self._jobs_lock:
+            if self._shutting_down:
+                raise RuntimeError("Worker đang shutdown")
 
-        if self._pool is None:
-            raise RuntimeError("Worker chưa được khởi tạo")
+            token = CancellationToken()
+            self._cancel_tokens[job_id] = token
+            self.progress.queued(job_id)
+            try:
+                if video_io.media_type(input_path) == "video":
+                    self.live.init_job(job_id)
+            except Exception:
+                pass
 
-        return self._pool.submit(
-            self._run, job_id, Path(input_path), model_name, job_overrides
+            if not self.sync:
+                try:
+                    if self._pool is None:
+                        raise RuntimeError("Worker chưa được khởi tạo")
+
+                    future = self._pool.submit(
+                        self._run,
+                        job_id,
+                        Path(input_path),
+                        model_name,
+                        job_overrides,
+                        render_video=render_video,
+                    )
+                    self._futures[job_id] = future
+                    return future
+                except BaseException:
+                    if self._cancel_tokens.get(job_id) is token:
+                        self._cancel_tokens.pop(job_id, None)
+                        self._futures.pop(job_id, None)
+                    self.progress.set_stage(job_id, "failed")
+                    self.live.mark_finished(job_id, "failed")
+                    raise
+
+        self._run(
+            job_id,
+            Path(input_path),
+            model_name,
+            job_overrides,
+            render_video=render_video,
         )
+        return None
+
+    def get_cancel_token(self, job_id: int) -> CancellationToken | None:
+        """Trả token của job còn được quản lý, hoặc None khi đã kết thúc."""
+        with self._jobs_lock:
+            return self._cancel_tokens.get(job_id)
+
+    def is_cancelled(self, job_id: int) -> bool:
+        """Cho biết token hiện tại đã bị hủy; job đã dọn token trả False."""
+        token = self.get_cancel_token(job_id)
+        return token is not None and token.is_cancelled()
+
+    def cancel(self, job_id: int) -> bool:
+        """Yêu cầu hủy job; chốt trạng thái ngay nếu future chưa chạy."""
+        with self._jobs_lock:
+            token = self._cancel_tokens.get(job_id)
+            future = self._futures.get(job_id)
+
+        if token is None:
+            return False
+
+        # Listener có thể lấy khóa riêng; không gọi khi giữ khóa quản lý job.
+        token.cancel("Job cancelled")
+
+        if future is not None and future.cancel():
+            with self._jobs_lock:
+                if self._cancel_tokens.get(job_id) is not token:
+                    return True
+                try:
+                    self.store.fail_job(job_id, "Job đã bị hủy")
+                finally:
+                    self.progress.set_stage(job_id, "failed")
+                    self.live.mark_finished(job_id, "failed")
+                    self._cancel_tokens.pop(job_id, None)
+                    if self._futures.get(job_id) is future:
+                        self._futures.pop(job_id, None)
+
+        return True
 
     def _run(
         self,
@@ -514,13 +586,30 @@ class JobRunner:
         input_path: Path,
         model_name: str,
         overrides: dict[str, Any] | None = None,
+        *,
+        render_video: bool = True,
     ) -> None:
-        """Xử lý job, cập nhật từng frame và luôn đóng slot live khi kết thúc."""
+        """Xử lý job, hỗ trợ hủy và luôn giải phóng token cùng slot live."""
+        with self._jobs_lock:
+            token = self._cancel_tokens.get(job_id)
+            if token is None:
+                token = CancellationToken()
+                self._cancel_tokens[job_id] = token
+            if self._shutting_down:
+                cancel_before_start = True
+            else:
+                cancel_before_start = False
+
+        if cancel_before_start:
+            token.cancel("Job cancelled")
+
         final_status = "failed"
         try:
+            token.raise_if_cancelled()
             base_cfg = self.cfg_for(model_name)
             cfg = deep_merge(base_cfg, overrides) if overrides else base_cfg
             is_video, frame_count, video_fps = _media_info(input_path)
+            token.raise_if_cancelled()
 
             if is_video and not self.live.has_slot(job_id):
                 self.live.init_job(job_id)
@@ -531,7 +620,10 @@ class JobRunner:
             if not model_loaded:
                 self.progress.set_stage(job_id, "loading_model")
 
+            token.raise_if_cancelled()
             detector = self.get_detector(model_name)
+            token.raise_if_cancelled()
+
             self.progress.start_processing(
                 job_id,
                 frame_count,
@@ -572,27 +664,57 @@ class JobRunner:
                 job_id=job_id,
                 out_dir=self.out_dir,
                 on_frame=_on_frame,
+                render_video=render_video,
+                cancel_event=token,
             )
             self.progress.set_stage(job_id, "done")
             final_status = "done"
         except Exception as exc:
             self.progress.set_stage(job_id, "failed")
-            log.exception("Job %s lỗi", job_id)
+            if token.is_cancelled():
+                log.info("Job %s đã bị hủy", job_id)
+                error_message = "Job đã bị hủy"
+            else:
+                log.exception("Job %s lỗi", job_id)
+                error_message = f"{type(exc).__name__}: {exc}"
+
             job = (
                 self.store.get_job(job_id)
                 if hasattr(self.store, "get_job")
                 else None
             )
             if not job or job.get("status") != "failed":
-                self.store.fail_job(job_id, f"{type(exc).__name__}: {exc}")
+                self.store.fail_job(job_id, error_message)
         finally:
+            with self._jobs_lock:
+                if self._cancel_tokens.get(job_id) is token:
+                    self._cancel_tokens.pop(job_id, None)
+                    self._futures.pop(job_id, None)
             self.live.mark_finished(job_id, final_status)
 
     def shutdown(self, wait: bool = False) -> None:
-        """Đóng các luồng MJPEG trước khi dừng executor."""
-        self.live.shutdown()
-        if self._pool is not None:
-            self._pool.shutdown(wait=wait, cancel_futures=not wait)
+        """Hủy mọi job trước khi đóng luồng MJPEG và dừng executor."""
+        with self._jobs_lock:
+            self._shutting_down = True
+            tokens = tuple(self._cancel_tokens.items())
+
+        # Gửi tín hiệu tới tất cả worker trước các thao tác ghi trạng thái.
+        for job_id, token in tokens:
+            try:
+                token.cancel("Job cancelled")
+            except Exception:
+                log.exception("Lỗi callback khi hủy job %s", job_id)
+
+        try:
+            for job_id, _ in tokens:
+                try:
+                    self.cancel(job_id)
+                except Exception:
+                    log.exception("Không thể chốt trạng thái hủy job %s", job_id)
+        finally:
+            self.live.shutdown()
+            if self._pool is not None:
+                self._pool.shutdown(wait=wait, cancel_futures=not wait)
 
 
 def _media_info(input_path: Path) -> tuple[bool, int | None, float | None]:

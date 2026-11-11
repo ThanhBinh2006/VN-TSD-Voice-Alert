@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import Mock
 
@@ -13,7 +18,7 @@ import pytest
 
 from ts_alert import pipeline
 from ts_alert.db.interface import ResultStore
-from ts_alert.postprocess.tts import build_speech_text
+from ts_alert.postprocess.tts import build_speech_text, synthesize
 from ts_alert.types import Detection
 from ts_alert.utils.io import load_classes, read_yaml
 
@@ -344,3 +349,175 @@ def test_pipeline_passes_cfg_and_speaks_position_for_real_classes(
     repo.finish_job.assert_called_once()
     repo.fail_job.assert_not_called()
     merge_mock.assert_not_called()
+
+
+def test_synthesize_disk_cache_hits_and_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kiểm tra cache, bản sao độc lập và tổng hợp khi tắt cache."""
+    call_count = 0
+    fake_module = ModuleType("gtts")
+
+    class FakeGTTS:
+        """Thay gTTS bằng bộ tổng hợp giả hoàn toàn offline."""
+
+        def __init__(self, text: str, lang: str) -> None:
+            """Lưu văn bản và kiểm tra ngôn ngữ được truyền vào."""
+            self.text = text
+            assert lang == "vi"
+
+        def save(self, path: str) -> None:
+            """Ghi dữ liệu giả và đếm số lần tổng hợp."""
+            nonlocal call_count
+            call_count += 1
+            Path(path).write_bytes(b"ID3fake-" + self.text.encode("utf-8"))
+
+    monkeypatch.setattr(fake_module, "gTTS", FakeGTTS, raising=False)
+    monkeypatch.setitem(sys.modules, "gtts", fake_module)
+
+    cache_dir = tmp_path / "cache"
+    cfg: dict[str, Any] = {
+        "postprocess": {
+            "tts": {
+                "engine": "gtts",
+                "lang": "vi",
+                "cache_enabled": True,
+                "cache_dir": str(cache_dir),
+            }
+        }
+    }
+    text = "Bên trái, cấm rẽ trái"
+    expected = b"ID3fake-" + text.encode("utf-8")
+    out1 = tmp_path / "out1.mp3"
+    out2 = tmp_path / "out2.mp3"
+
+    assert synthesize(text, out1, cfg) == out1
+    assert synthesize(text, out2, cfg) == out2
+    assert call_count == 1
+    assert out1.read_bytes() == expected
+    assert out2.read_bytes() == expected
+
+    cache_files = list(cache_dir.glob("*.mp3"))
+    assert len(cache_files) == 1
+    assert cache_files[0].read_bytes() == expected
+
+    out1.unlink()
+    out3 = tmp_path / "out3.mp3"
+
+    assert synthesize(text, out3, cfg) == out3
+    assert call_count == 1
+    assert out3.read_bytes() == expected
+    assert cache_files[0].read_bytes() == expected
+
+    other_text = "Bên phải, cấm dừng"
+    other_out = tmp_path / "other.mp3"
+
+    assert synthesize(other_text, other_out, cfg) == other_out
+    assert call_count == 2
+    assert other_out.read_bytes() == b"ID3fake-" + other_text.encode("utf-8")
+    assert len(list(cache_dir.glob("*.mp3"))) == 2
+
+    cache_before = {
+        path.name: path.read_bytes() for path in cache_dir.iterdir()
+    }
+    disabled_cache_dir = tmp_path / "disabled_cache"
+    cfg["postprocess"]["tts"].update(
+        {
+            "cache_enabled": False,
+            "cache_dir": str(disabled_cache_dir),
+        }
+    )
+
+    for index in range(2):
+        out_path = tmp_path / f"uncached_{index}.mp3"
+        assert synthesize(text, out_path, cfg) == out_path
+        assert out_path.read_bytes() == expected
+        assert call_count == 3 + index
+
+    assert not disabled_cache_dir.exists()
+    assert {
+        path.name: path.read_bytes() for path in cache_dir.iterdir()
+    } == cache_before
+
+
+def test_synthesize_disk_cache_concurrent_threads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bốn luồng dùng chung cache chỉ tổng hợp một lần cho cùng câu."""
+    call_count = 0
+    counter_lock = threading.Lock()
+    start_barrier = threading.Barrier(4)
+    fake_module = ModuleType("gtts")
+
+    class FakeGTTS:
+        """Mô phỏng gTTS có độ trễ để các luồng truy cập chồng lấn."""
+
+        def __init__(self, text: str, lang: str) -> None:
+            """Lưu văn bản và kiểm tra ngôn ngữ tổng hợp."""
+            self.text = text
+            assert lang == "vi"
+
+        def save(self, path: str) -> None:
+            """Đếm an toàn giữa các luồng rồi ghi dữ liệu âm thanh giả."""
+            nonlocal call_count
+            with counter_lock:
+                call_count += 1
+            time.sleep(0.05)
+            Path(path).write_bytes(b"ID3fake-" + self.text.encode("utf-8"))
+
+    monkeypatch.setattr(fake_module, "gTTS", FakeGTTS, raising=False)
+    monkeypatch.setitem(sys.modules, "gtts", fake_module)
+
+    cfg: dict[str, Any] = {
+        "postprocess": {
+            "tts": {
+                "engine": "gtts",
+                "lang": "vi",
+                "cache_enabled": True,
+                "cache_dir": str(tmp_path / "cache"),
+            }
+        }
+    }
+    text = "Phía trước, giới hạn tốc độ"
+    expected = b"ID3fake-" + text.encode("utf-8")
+    out_paths = [tmp_path / f"thread_{index}.mp3" for index in range(4)]
+
+    def synthesize_concurrently(out_path: Path) -> Path:
+        """Chờ đủ bốn luồng trước khi truy cập cache."""
+        start_barrier.wait(timeout=5.0)
+        return synthesize(text, out_path, cfg)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(synthesize_concurrently, path)
+            for path in out_paths
+        ]
+        results = [future.result(timeout=10.0) for future in futures]
+
+    assert results == out_paths
+    assert call_count == 1
+    assert expected
+    assert all(path.read_bytes() == expected for path in out_paths)
+
+    cache_files = list((tmp_path / "cache").glob("*.mp3"))
+    assert len(cache_files) == 1
+    assert cache_files[0].read_bytes() == expected
+
+
+def test_shared_yaml_tts_and_realtime_defaults(
+    shared_cfg: dict[str, Any],
+) -> None:
+    """Giữ nguyên template chung và xác nhận cấu hình giọng nói nhanh."""
+    tts_cfg = shared_cfg["postprocess"]["tts"]
+    assert tts_cfg["template"] == "Chú ý, {position_text} có biển {name}"
+    assert tts_cfg["cache_enabled"] is True
+
+    realtime_cfg = shared_cfg["realtime"]
+    assert realtime_cfg["tts_playback_rate"] == 1.4
+    assert realtime_cfg["tts_compact"] is True
+    assert realtime_cfg["tts_compact_template"] == "{position_text}, {name}"
+    assert realtime_cfg["tts_cutoff_on_pass"] is True
+    assert realtime_cfg["tts_cutoff_grace_sec"] == 0.25
+    assert realtime_cfg["tts_cache_enabled"] is True

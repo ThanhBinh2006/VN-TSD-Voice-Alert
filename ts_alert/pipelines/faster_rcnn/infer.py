@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import threading
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -16,6 +18,9 @@ from ts_alert.types import Detection
 from ts_alert.utils.io import load_classes
 
 
+_LOCK_INIT = threading.Lock()
+
+
 class FasterRCNNDetector(BaseDetector):
     """Phát hiện biển báo và trả về tọa độ theo ảnh gốc."""
 
@@ -23,6 +28,9 @@ class FasterRCNNDetector(BaseDetector):
 
     def __init__(self, weights: str | Path, cfg: dict) -> None:
         """Nạp trọng số, ngưỡng suy luận, danh mục lớp và thiết bị."""
+        self._predict_lock = threading.RLock()
+        self.weights_path = Path(weights)
+
         inference = cfg.get("inference", {})
         self.conf: float = float(inference.get("conf_threshold", 0.25))
         self.iou: float = float(inference.get("iou_threshold", 0.5))
@@ -42,6 +50,57 @@ class FasterRCNNDetector(BaseDetector):
             self.model.roi_heads, "nms_thresh"
         ):
             self.model.roi_heads.nms_thresh = self.iou
+
+        cpu_cfg = inference.get("cpu") or {}
+        if bool(cpu_cfg.get("apply_on_load", False)):
+            self.apply_cpu_optimization(cpu_cfg)
+
+    def _guard(self) -> threading.RLock:
+        """Trả về khóa suy luận, khởi tạo an toàn nếu chưa tồn tại."""
+        lock = getattr(self, "_predict_lock", None)
+        if lock is None:
+            with _LOCK_INIT:
+                lock = getattr(self, "_predict_lock", None)
+                if lock is None:
+                    lock = threading.RLock()
+                    self._predict_lock = lock
+        return lock
+
+    def apply_cpu_optimization(
+        self,
+        cpu_cfg: dict | str | None = None,
+    ) -> dict[str, Any]:
+        """Áp dụng cấu hình CPU dưới khóa dùng chung với suy luận."""
+        from ts_alert.runtime.cpu_opt import apply_faster_rcnn_cpu_tuning
+
+        with self._guard():
+            return apply_faster_rcnn_cpu_tuning(self, cpu_cfg)
+
+    def restore_cpu_optimization(self) -> bool:
+        """Khôi phục cấu hình đã lưu, đồng bộ với các lần suy luận."""
+        from ts_alert.runtime.cpu_opt import restore_cpu_tuning
+
+        with self._guard():
+            return restore_cpu_tuning(self)
+
+    def get_runtime_profile(self) -> dict[str, Any]:
+        """Trả về bản chụp thông số suy luận thực tế của mô hình."""
+        with self._guard():
+            transform = getattr(self.model, "transform", None)
+            rpn = getattr(self.model, "rpn", None)
+            roi_heads = getattr(self.model, "roi_heads", None)
+            pre_nms = getattr(rpn, "_pre_nms_top_n", None)
+            post_nms = getattr(rpn, "_post_nms_top_n", None)
+            return {
+                "model": self.name,
+                "min_size": getattr(transform, "min_size", None),
+                "max_size": getattr(transform, "max_size", None),
+                "rpn_pre_nms_top_n": pre_nms.get("testing") if isinstance(pre_nms, dict) else None,
+                "rpn_post_nms_top_n": post_nms.get("testing") if isinstance(post_nms, dict) else None,
+                "detections_per_img": getattr(roi_heads, "detections_per_img", None),
+                "device": str(self.device),
+                "cpu_profile": getattr(self, "_cpu_profile", None),
+            }
 
     def predict(
         self,
@@ -81,20 +140,20 @@ class FasterRCNNDetector(BaseDetector):
         rgb /= np.float32(255.0)
         tensor = torch.from_numpy(rgb).permute(2, 0, 1).to(self.device)
 
-        roi_heads = None
-        original_score_thresh: float | None = None
-        if hasattr(self.model, "roi_heads") and hasattr(
-            self.model.roi_heads, "score_thresh"
-        ):
-            roi_heads = self.model.roi_heads
-            original_score_thresh = roi_heads.score_thresh
+        with self._guard(), torch.inference_mode():
+            roi_heads = None
+            original_score_thresh: float | None = None
+            if hasattr(self.model, "roi_heads") and hasattr(
+                self.model.roi_heads, "score_thresh"
+            ):
+                roi_heads = self.model.roi_heads
+                original_score_thresh = roi_heads.score_thresh
 
-        lower_score_thresh = (
-            original_score_thresh is not None
-            and threshold < original_score_thresh
-        )
+            lower_score_thresh = (
+                original_score_thresh is not None
+                and threshold < original_score_thresh
+            )
 
-        with torch.inference_mode():
             try:
                 if lower_score_thresh:
                     roi_heads.score_thresh = threshold

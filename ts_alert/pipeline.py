@@ -1,11 +1,4 @@
-"""LUỒNG XỬ LÝ TỔNG THỂ (đã code sẵn)
-
-    ảnh/video -> detector.predict -> vị trí (trái/phải/trước mặt) -> ghi log
-              -> chống lặp -> vẽ layer -> TTS -> ghép A/V -> ghi log (thời gian, số liệu)
-
-Các bước cụ thể gọi sang module của từng thành viên; chỉ cần hiện thực các hàm TODO trong đó.
-Nơi lưu log là `repo` (giao diện ResultStore trong ts_alert/db/interface.py).
-"""
+"""Luồng xử lý ảnh/video, phát hiện biển báo, chống lặp, TTS và ghi kết quả."""
 from __future__ import annotations
 
 import inspect
@@ -28,7 +21,12 @@ from ts_alert.utils.io import load_classes
 log = logging.getLogger(__name__)
 
 
+class _MediaCancelledError(RuntimeError):
+    """Báo tác vụ bị hủy để đóng tài nguyên và ghi trạng thái riêng."""
+
+
 def _ms(since: float) -> float:
+    """Trả thời gian đã trôi qua tính bằng mili giây."""
     return (time.perf_counter() - since) * 1000.0
 
 
@@ -81,6 +79,17 @@ def _build_speech_text(label: str, pos: str, classes: dict, cfg: dict) -> str:
     return tts.build_speech_text(label, pos, classes)
 
 
+def _check_cancelled(cancel_event: Any) -> None:
+    """Kiểm tra threading.Event hoặc CancellationToken và báo hủy nếu cần."""
+    if cancel_event is None:
+        return
+
+    for method_name in ("is_set", "is_cancelled"):
+        check = getattr(cancel_event, method_name, None)
+        if callable(check) and check():
+            raise _MediaCancelledError("Cancelled")
+
+
 def process_media(
     input_path: str | PathLike[str],
     model_name: str,
@@ -90,11 +99,19 @@ def process_media(
     job_id: int | None = None,
     out_dir: str | PathLike[str] | None = None,
     on_frame: Callable[..., Any] | None = None,
+    render_video: bool = True,
+    cancel_event: Any = None,
 ) -> dict:
-    """Xử lý một ảnh hoặc video end-to-end và ghi log. Trả dict tóm tắt kết quả.
+    """Xử lý ảnh/video và ghi log, hỗ trợ bỏ render video và hủy tác vụ.
 
-    unique_sign_count : số biển báo (đối tượng) sau chống lặp = số SpeechEvent
-    voice_play_count  : số lần giọng nói THỰC SỰ được tạo (TTS thành công)
+    unique_sign_count là số SpeechEvent sau chống lặp.
+    voice_play_count là số lần TTS tạo âm thanh thành công.
+
+    Với video và render_video=False, callback nhận frame gốc cùng detections,
+    layer_time_ms bằng 0.0 và output_path là chuỗi rỗng.
+
+    Khi nhận tín hiệu hủy, đóng writer, dọn video tạm, ghi lỗi vào repo
+    và phát sinh RuntimeError("Cancelled").
     """
     input_path = Path(input_path)
     cfg = cfg or resolve_config(model_name)
@@ -114,8 +131,10 @@ def process_media(
     layer_ms = tts_ms = 0.0
     unique_signs = voice_plays = 0
     audio_events: list[dict] = []
+    silent_path: Path | None = None
 
     try:
+        _check_cancelled(cancel_event)
         frame_stride = _resolve_frame_stride(cfg)
         detector = detector or get_detector(model_name, cfg)
         classes = load_classes(resolve_path(paths["classes_csv"]))
@@ -125,26 +144,32 @@ def process_media(
         audio_dir = out_dir / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
         stem = f"job{job_id}_{input_path.stem}"
+        should_render = input_type != "video" or render_video
+        output_path = ""
 
         writer = None
         try:
             if input_type == "video":
-                info = video_io.get_video_info(input_path)
-                silent_path = out_dir / "videos" / f"{stem}_silent.mp4"
-                final_path = out_dir / "videos" / f"{stem}_result.mp4"
-                silent_path.parent.mkdir(parents=True, exist_ok=True)
-                writer = video_io.VideoWriter(
-                    silent_path,
-                    info["fps"],
-                    (info["width"], info["height"]),
-                )
+                if render_video:
+                    info = video_io.get_video_info(input_path)
+                    silent_path = out_dir / "videos" / f"{stem}_silent.mp4"
+                    final_path = out_dir / "videos" / f"{stem}_result.mp4"
+                    silent_path.parent.mkdir(parents=True, exist_ok=True)
+                    writer = video_io.VideoWriter(
+                        silent_path,
+                        info["fps"],
+                        (info["width"], info["height"]),
+                    )
+                    output_path = str(final_path)
                 frames = video_io.iter_frames(input_path)
             else:
                 final_path = out_dir / "images" / f"{stem}_result.jpg"
                 final_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path = str(final_path)
                 frames = iter([(0, video_io.read_image(input_path), 0.0)])
 
             for frame_index, frame, timestamp in frames:
+                _check_cancelled(cancel_event)
                 should_predict = (
                     input_type != "video" or frame_index % frame_stride == 0
                 )
@@ -168,11 +193,15 @@ def process_media(
                 else:
                     draw_dets = cached_detections
 
-                t0 = time.perf_counter()
-                drawn_frame = draw_layer.draw_detections(frame, draw_dets)
-                layer_ms += _ms(t0)
+                if should_render:
+                    t0 = time.perf_counter()
+                    drawn_frame = draw_layer.draw_detections(frame, draw_dets)
+                    layer_ms += _ms(t0)
+                else:
+                    drawn_frame = frame
 
                 for event in frame_events:
+                    _check_cancelled(cancel_event)
                     text = _build_speech_text(
                         event["label"], event["position"], classes, cfg
                     )
@@ -204,9 +233,10 @@ def process_media(
                         }
                     )
 
+                _check_cancelled(cancel_event)
                 if writer is not None:
                     writer.write(drawn_frame)
-                else:
+                elif input_type != "video":
                     video_io.write_image(final_path, drawn_frame)
 
                 if on_frame is not None:
@@ -224,7 +254,9 @@ def process_media(
             if writer is not None:
                 writer.close()
 
-        if input_type == "video":
+        _check_cancelled(cancel_event)
+
+        if input_type == "video" and render_video:
             if audio_events:
                 merge_av.merge_audio_video(
                     silent_path, audio_events, final_path
@@ -233,10 +265,11 @@ def process_media(
             else:
                 silent_path.replace(final_path)
 
+        _check_cancelled(cancel_event)
         total_ms = _ms(t_total)
         repo.finish_job(
             job_id,
-            str(final_path),
+            output_path,
             unique_signs,
             voice_plays,
             layer_ms,
@@ -247,7 +280,7 @@ def process_media(
         return {
             "job_id": job_id,
             "status": "done",
-            "output_path": str(final_path),
+            "output_path": output_path,
             "unique_sign_count": unique_signs,
             "voice_play_count": voice_plays,
             "layer_time_ms": layer_ms,
@@ -255,6 +288,18 @@ def process_media(
             "total_time_ms": total_ms,
             "audio_paths": [str(e["audio_path"]) for e in audio_events],
         }
+    except _MediaCancelledError:
+        if silent_path is not None:
+            try:
+                silent_path.unlink(missing_ok=True)
+            except OSError:
+                log.warning(
+                    "Không thể xóa video tạm khi hủy: %s",
+                    silent_path,
+                    exc_info=True,
+                )
+        repo.fail_job(job_id, "Job đã bị hủy")
+        raise
     except Exception as exc:
         repo.fail_job(job_id, f"{type(exc).__name__}: {exc}")
         raise
