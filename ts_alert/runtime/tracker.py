@@ -30,7 +30,7 @@ class TrackerConfig:
     max_extrapolate_sec: float = 0.65
     max_staleness_sec: float = 0.85
     min_hits_to_confirm: int = 2
-    single_hit_conf_threshold: float | None = 0.60
+    single_hit_conf_threshold: float | None = 0.70
     iou_threshold: float = 0.20
     center_distance_weight: float = 0.25
     use_optical_flow: bool = True
