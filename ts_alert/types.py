@@ -25,3 +25,50 @@ class SpeechEvent(TypedDict):
     position: str
     frame_index: int
     timestamp_sec: float
+
+
+class TrackedDetection(TypedDict, total=False):
+    """Kết quả theo dõi đối tượng trên khung hình gốc trong pipeline realtime."""
+
+    frame_id: int
+    source_timestamp: float  # Thời điểm frame gốc, tính bằng giây.
+    timestamp_sec: float     # Alias tương thích của source_timestamp.
+    class_id: int
+    confidence: float
+    bbox: list[float]        # [x1, y1, x2, y2] pixel, theo khung hình gốc.
+    track_id: int | None
+    label: str
+    position: str            # left | front | right
+    vx: float                # Vận tốc theo trục x, px/giây.
+    vy: float                # Vận tốc theo trục y, px/giây.
+    state: str               # tentative | active | lost
+    confirmed: bool
+    hits: int
+    missed_detections: int
+    age_sec: float
+    ttl_sec: float
+    lag_ms: float
+    source: str              # detector | optical_flow | motion_pred
+    last_detect_frame_id: int
+    last_detect_timestamp: float
+    alert_emitted: bool
+    class_votes: dict[int, float]
+
+
+class RuntimeAlert(TypedDict, total=False):
+    """Dữ liệu cảnh báo và trạng thái xử lý của worker TTS bất đồng bộ."""
+
+    alert_id: str
+    track_id: int | None
+    frame_id: int
+    source_timestamp: float  # Thời điểm frame gốc, tính bằng giây.
+    class_id: int
+    label: str
+    position: str
+    spoken_text: str
+    audio_path: str
+    audio_url: str
+    created_wall_time: float   # Thời gian tạo, tính bằng giây theo wall clock.
+    deadline_wall_time: float  # Hạn xử lý, cùng hệ thời gian với created_wall_time.
+    latency_ms: float
+    status: str  # queued | ready | dropped_stale | deduped | timeout | error

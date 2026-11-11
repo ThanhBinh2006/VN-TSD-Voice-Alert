@@ -20,7 +20,7 @@ def analyze_and_plot_brightness_sharpness_raw(
     img_paths: list[Path],
     out_dir: Path,
     max_samples: int = 1000,
-    blur_threshold: float = 100.0,
+    blur_threshold: float = 50.0,
     fig_num: int = 7,
 ) -> dict[str, Any]:
     """Figure 07 (RAW): Đánh giá Quang học Độ sáng & Độ sắc nét trên tập dữ liệu thô (2x2 grid)."""
@@ -126,7 +126,7 @@ def analyze_and_plot_brightness_sharpness_processed(
     split_stems: dict[str, list[str]],
     out_dir: Path,
     max_samples: int = 1200,
-    blur_threshold: float = 100.0,
+    blur_threshold: float = 50.0,
     fig_num: int = 8,
 ) -> dict[str, Any]:
     """Figure 08 (PROCESSED): Đánh giá Quang học phân tách độc lập theo từng tập (Train, Val, Test) (3x3 grid)."""

@@ -35,6 +35,7 @@ from ts_alert.config.resolve import get_num_classes, resolve_path
 from ts_alert.data.helpers.augmentation import (
     _read_raw_labels,
     _write_labels,
+    compute_adaptive_class_targets,
     get_safe_crop_bounds,
     transform_and_letterbox_crop,
 )
@@ -175,6 +176,8 @@ def split_samples(
     hamming_thresh: int = 380,
     min_box_px: int = 8,
     image_size: int = 640,
+    blur_threshold: float = 50.0,
+    dark_threshold: float = 85.0,
 ) -> dict[str, list[dict]]:
     """Chia {"train": [...], "val": [...], "test": [...]} theo ratios, gom cụm dHash độc lập 100%
     và bảo đảm tập train chứa toàn bộ các lớp xuất hiện trong dataset."""
@@ -219,12 +222,118 @@ def split_samples(
         img_paths=img_paths,
         ratio=ratio_tuple,
         seed=seed,
+        blur_threshold=blur_threshold,
+        dark_threshold=dark_threshold,
     )
 
     return {
         sname: [stem_to_sample[st] for st in split_stems.get(sname, []) if st in stem_to_sample]
         for sname in ("train", "val", "test")
     }
+
+
+def promote_rare_classes_to_train(
+    splits: dict[str, list[dict]],
+    clean_boxes: dict[str, list[tuple[int, float, float, float, float]]],
+    min_train_boxes: int = 10,
+) -> tuple[dict[str, list[dict]], dict[str, Any]]:
+    """Chuyển ảnh chứa lớp thiếu box từ val/test sang train dựa trên nhãn đã lọc.
+
+    Các lớp cần gom được xác định một lần từ số box trước khi chuyển.
+    Chỉ chuyển ảnh chứa ít nhất một lớp cần gom, không chuyển cả cụm.
+    Không thay đổi các danh sách split đầu vào.
+
+    Metadata lưu số ảnh chuyển và số box theo split/class trước, sau chuyển.
+    """
+    if min_train_boxes < 0:
+        raise ValueError("min_train_boxes phải lớn hơn hoặc bằng 0.")
+
+    split_names = ("train", "val", "test")
+    new_splits = {name: list(items) for name, items in splits.items()}
+    for name in split_names:
+        new_splits.setdefault(name, [])
+
+    def _count_boxes(
+        current_splits: dict[str, list[dict]],
+    ) -> dict[str, Counter[int]]:
+        """Đếm toàn bộ box đã lọc theo class_id trong từng split."""
+        return {
+            name: Counter(
+                box[0]
+                for sample in current_splits[name]
+                for box in clean_boxes.get(sample["stem"], [])
+            )
+            for name in split_names
+        }
+
+    counts_before = _count_boxes(new_splits)
+    train_counts = counts_before["train"]
+    val_counts = counts_before["val"]
+    test_counts = counts_before["test"]
+
+    all_classes = sorted(
+        set(train_counts) | set(val_counts) | set(test_counts)
+    )
+    promoted_classes = [
+        cid
+        for cid in all_classes
+        if train_counts[cid] < min_train_boxes
+        and (val_counts[cid] > 0 or test_counts[cid] > 0)
+    ]
+    promoted_class_set = set(promoted_classes)
+
+    print(
+        "[promote_rare_classes_to_train] "
+        f"Các class có ít hơn {min_train_boxes} box trong Train cần gom: "
+        f"{promoted_classes}"
+    )
+    for cid in promoted_classes:
+        print(
+            f"[promote_rare_classes_to_train]   Class {cid}: "
+            f"train={train_counts[cid]}, "
+            f"val={val_counts[cid]}, test={test_counts[cid]} box."
+        )
+
+    moved_counts: dict[str, int] = {"val": 0, "test": 0}
+    for name in ("val", "test"):
+        retained: list[dict] = []
+        for sample in new_splits[name]:
+            if any(
+                box[0] in promoted_class_set
+                for box in clean_boxes.get(sample["stem"], [])
+            ):
+                new_splits["train"].append(sample)
+                moved_counts[name] += 1
+            else:
+                retained.append(sample)
+        new_splits[name] = retained
+
+    counts_after = _count_boxes(new_splits)
+    moved_total = moved_counts["val"] + moved_counts["test"]
+
+    print(
+        "[promote_rare_classes_to_train] "
+        f"Chuyển val -> train: {moved_counts['val']} ảnh; "
+        f"test -> train: {moved_counts['test']} ảnh; "
+        f"tổng cộng: {moved_total} ảnh."
+    )
+
+    info: dict[str, Any] = {
+        "min_train_boxes": min_train_boxes,
+        "promoted_classes": promoted_classes,
+        "moved_from_val": moved_counts["val"],
+        "moved_from_test": moved_counts["test"],
+        "moved_total": moved_total,
+        "class_counts_before": {
+            name: {cid: counts_before[name][cid] for cid in all_classes}
+            for name in split_names
+        },
+        "class_counts_after": {
+            name: {cid: counts_after[name][cid] for cid in all_classes}
+            for name in split_names
+        },
+    }
+    return new_splits, info
 
 
 def write_data_yaml(out_dir: Path, class_names: list[str]) -> None:
@@ -428,7 +537,10 @@ def _consolidate_post_resize_leakage(
     }
 
 
-def run_preprocess(cfg: dict, data_root=None) -> dict:
+def run_preprocess(
+    cfg: dict,
+    data_root: str | Path | None = None,
+) -> dict:
     """Chạy quy trình tiền xử lý 6 bước và trả về metadata tổng hợp."""
     data = cfg["data"]
     raw_dir = resolve_path(data_root or cfg["paths"]["raw_dir"])
@@ -442,11 +554,14 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
     img_size = int(data.get("image_size", 640))
     pad_val = int(data.get("pad_value", 114))
     min_box_px = int(cfg.get("preprocess", {}).get("min_box_px", 8))
+    blur_threshold = float(data.get("blur_threshold", cfg.get("preprocess", {}).get("blur_threshold", 50.0)))
+    dark_threshold = float(data.get("dark_threshold", cfg.get("preprocess", {}).get("dark_threshold", 85.0)))
     hash_size = int(cfg.get("split", {}).get("hash_size", 32))
     hamming_thresh = int(cfg.get("split", {}).get("hamming_threshold", 380))
     augment_minority = True
 
     print(f"[run_preprocess] Bắt đầu tiền xử lý: raw_dir={raw_dir}, out_dir={out_dir}")
+    print(f"[run_preprocess]   Cấu hình chất lượng ảnh: blur_threshold={blur_threshold}, dark_threshold={dark_threshold}")
     t0 = time.time()
 
     # Quét dữ liệu thô
@@ -469,6 +584,17 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
         hamming_thresh=hamming_thresh,
         min_box_px=min_box_px,
         image_size=img_size,
+        blur_threshold=blur_threshold,
+        dark_threshold=dark_threshold,
+    )
+
+    # BƯỚC 3.5: Gom ảnh chứa lớp hiếm từ val/test lên train
+    print(
+        "[run_preprocess] BƯỚC 3.5: Gom ảnh chứa lớp có ít hơn "
+        "10 box trong Train từ Val/Test lên Train..."
+    )
+    splits, promo_info = promote_rare_classes_to_train(
+        splits, clean_boxes, min_train_boxes=10
     )
 
     # BƯỚC 4: Augment lớp thiểu số trong tập train
@@ -479,7 +605,16 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
     if augment_minority and "train" in splits:
         rng = random.Random(cfg["seed"])
         train_class_counts: Counter[int] = Counter()
-        class_candidates = defaultdict(list)
+        class_candidates: dict[
+            int,
+            list[
+                tuple[
+                    str,
+                    tuple[int, float, float, float, float],
+                    tuple[float, float, float, float],
+                ]
+            ],
+        ] = defaultdict(list)
 
         for s in splits["train"]:
             stem = s["stem"]
@@ -500,66 +635,80 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
                     class_candidates[b[0]].append((stem, b, bounds))
 
         # Mục tiêu adaptive
-        class_targets = {}
-        for cid, cnt in train_class_counts.items():
-            if cnt < 30:
-                class_targets[cid] = max(int(round(cnt * 2.5)), min(15, cnt * 3))
-            elif cnt <= 150:
-                class_targets[cid] = int(round(cnt * 1.75))
-            else:
-                class_targets[cid] = cnt
-
-        max_augmented_per_class = 7
+        class_targets = compute_adaptive_class_targets(train_class_counts)
         class_needed = {
-            c: min(class_targets[c] - train_class_counts[c], max_augmented_per_class)
+            c: class_targets[c] - train_class_counts[c]
             for c in train_class_counts
             if class_targets[c] > train_class_counts[c]
         }
 
         # Chống rò rỉ đối chiếu với val và test
-        val_test_hashes = []
+        val_test_hashes: list[np.ndarray] = []
         for sname in ("val", "test"):
             for s in splits.get(sname, []):
-                h = calculate_dhash(s["image"], hash_size=32, strip_padding=True)
+                h = calculate_dhash(
+                    s["image"], hash_size=hash_size, strip_padding=True
+                )
                 if h is not None:
                     val_test_hashes.append(h)
         val_test_packed = np.packbits(np.array(val_test_hashes, dtype=np.uint8), axis=1) if val_test_hashes else None
         popcount = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
         aug_per_class: Counter[int] = Counter()
-        for cid, needed in class_needed.items():
+        for cid, needed in sorted(
+            class_needed.items(), key=lambda x: train_class_counts[x[0]]
+        ):
             cands = list(class_candidates.get(cid, []))
             if not cands:
+                print(
+                    f"[run_preprocess]   Class {cid}: cần thêm {needed} ảnh "
+                    "nhưng không có candidate cắt an toàn."
+                )
                 continue
+
             rng.shuffle(cands)
             gen = 0
             attempts = 0
-            while gen < needed and attempts < len(cands) * 3:
+            max_attempts = max(needed * 25, len(cands) * 10, 100)
+
+            while gen < needed and attempts < max_attempts:
                 cand_stem, b, bounds = cands[attempts % len(cands)]
                 attempts += 1
+
                 im_raw = cv2.imread(str(stem_to_sample[cand_stem]["image"]))
                 if im_raw is None:
                     continue
-                orig_h, orig_w = im_raw.shape[:2]
+
                 canvas, final_box = transform_and_letterbox_crop(
                     im_raw, b, bounds, rng, (img_size, img_size), min_box_px, pad_val
                 )
-                if final_box is None:
+                if canvas is None or final_box is None:
                     continue
 
                 if val_test_packed is not None:
-                    h_aug = calculate_dhash(canvas, hash_size=32, strip_padding=True)
-                    if h_aug is not None:
-                        packed_aug = np.packbits(h_aug)
-                        diff = np.bitwise_xor(val_test_packed, packed_aug)
-                        dists = popcount[diff].sum(axis=1)
-                        if dists.min() <= hamming_thresh:
-                            continue
+                    h_aug = calculate_dhash(
+                        canvas, hash_size=hash_size, strip_padding=True
+                    )
+                    if h_aug is None:
+                        continue
+                    packed_aug = np.packbits(h_aug)
+                    diff = np.bitwise_xor(val_test_packed, packed_aug)
+                    dists = popcount[diff].sum(axis=1)
+                    if dists.min() <= hamming_thresh:
+                        continue
 
                 gen += 1
                 aug_stem = f"{cand_stem}_aug_{cid}_{gen}"
                 aug_items.append((aug_stem, canvas, [final_box]))
                 aug_per_class[cid] += 1
+
+            print(
+                f"[run_preprocess]   Class {cid}: "
+                f"train={train_class_counts[cid]} box, "
+                f"mục tiêu={class_targets[cid]} box, "
+                f"đã sinh={gen}/{needed} ảnh, "
+                f"số lần thử={attempts}/{max_attempts}."
+            )
 
         print(f"[run_preprocess]   Sinh {len(aug_items)} ảnh tăng cường cho {len(aug_per_class)} lớp thiểu số trong Train.")
 
@@ -606,6 +755,8 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
         "image_size": img_size,
         "seed": cfg["seed"],
         "num_classes": num_classes,
+        "blur_threshold": blur_threshold,
+        "dark_threshold": dark_threshold,
         "counts": {s: consolidation_res["split_stats"][s]["n_images"] for s in ("train", "val", "test")},
         "box_counts": {s: consolidation_res["split_stats"][s]["n_boxes_out"] for s in ("train", "val", "test")},
         "total_images_in": len(samples),
@@ -614,7 +765,52 @@ def run_preprocess(cfg: dict, data_root=None) -> dict:
         "remaining_leaks": consolidation_res["remaining_leaks"],
         "leakage_rate": 0.0,
         "elapsed_seconds": round(time.time() - t0, 2),
+        "rare_classes_promoted": promo_info,
+        "n_augmented_images": len(aug_items),
     }
     write_json(meta, out_dir / "meta.json")
     print(f"[run_preprocess] Hoàn thành tiền xử lý trong {meta['elapsed_seconds']}s -> {out_dir}")
     return meta
+
+
+def main(argv=None) -> None:
+    """Chạy tiền xử lý offline trực tiếp qua CLI (`python -m ts_alert.data.preprocess_offline`)."""
+    import argparse
+
+    from ts_alert.config.resolve import (
+        _load_with_inherits,
+        _runtime_path,
+        deep_merge,
+        parse_overrides,
+        resolve_config,
+    )
+    from ts_alert.utils.io import read_yaml
+
+    parser = argparse.ArgumentParser(description="Tiền xử lý dữ liệu offline (TSD-Voice-Alert).")
+    parser.add_argument("--config", type=Path, default=None, help="Đường dẫn file YAML cấu hình (vd: configs/shared.yaml)")
+    parser.add_argument("--data-root", default=None, help="Thư mục dữ liệu gốc (mặc định paths.raw_dir)")
+    parser.add_argument("--runtime", default="local", help="Runtime preset trong configs/runtime/ (default: local)")
+    parser.add_argument("--set", nargs="*", default=[], help="Ghi đè cấu hình, vd. data.image_size=640")
+    args = parser.parse_args(argv)
+
+    overrides = parse_overrides(args.set)
+    if args.config is not None:
+        cfg_path = resolve_path(args.config)
+        cfg = _load_with_inherits(cfg_path)
+        if args.runtime:
+            cfg = deep_merge(cfg, read_yaml(_runtime_path(args.runtime)))
+        cfg = deep_merge(cfg, overrides)
+    else:
+        cfg = resolve_config(None, args.runtime, overrides)
+
+    print(
+        json.dumps(
+            run_preprocess(cfg, args.data_root),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

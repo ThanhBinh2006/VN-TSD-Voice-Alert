@@ -1,19 +1,23 @@
 <!doctype html>
 <html lang="vi">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cảnh báo biển báo giao thông</title>
-  <link rel="preload" href="{{ url_for('static', filename='fonts/InterDisplay-Medium.woff') }}" as="font" type="font/woff" crossorigin>
+  <link rel="preload" href="{{ url_for('static', filename='fonts/InterDisplay-Medium.woff') }}" as="font"
+    type="font/woff" crossorigin>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
+
 <body>
   <header class="nav">
     <div class="nav-inner">
       <a class="brand" href="#/">
         <svg class="brand-sign" viewBox="0 0 40 40" aria-hidden="true">
-          <circle cx="20" cy="20" r="16" fill="#fff" stroke="#D52B1E" stroke-width="6"/>
-          <path d="M14.5 25.5 L20 13.5 L25.5 25.5" fill="none" stroke="#0F1215" stroke-width="3" stroke-linejoin="round"/>
+          <circle cx="20" cy="20" r="16" fill="#fff" stroke="#D52B1E" stroke-width="6" />
+          <path d="M14.5 25.5 L20 13.5 L25.5 25.5" fill="none" stroke="#0F1215" stroke-width="3"
+            stroke-linejoin="round" />
         </svg>
         <span>Cảnh báo biển báo giao thông</span>
       </a>
@@ -24,19 +28,45 @@
   <main class="layout">
     <div class="workspace">
 
-      <!-- Màn hình bắt đầu: giới thiệu ngắn + khu tải file lên -->
+      <!-- Màn hình bắt đầu: giới thiệu ngắn + khu chuyển tab nguồn xử lý -->
       <section id="home" class="home">
         <div class="hero">
           <h1>Nhận diện biển báo trong video, cảnh báo bằng giọng nói.</h1>
-          <p class="lede">Tải lên video hành trình hoặc ảnh chụp đường. Hệ thống tìm biển báo, xác định biển nằm bên trái, phía trước hay bên phải, rồi đọc cảnh báo đúng lúc biển xuất hiện.</p>
+          <p class="lede">Hệ thống tìm biển báo, định vị bên trái, phía trước hay bên phải, đồng bộ lớp phủ nhận diện
+            mượt mà và đọc cảnh báo tức thì bằng giọng nói tiếng Việt.</p>
         </div>
 
-        <form id="upload-form" class="stage upload" novalidate>
+        <!-- Thanh chuyển tab nguồn: Tải Video/Ảnh vs Camera Trực tiếp -->
+        <div class="home-nav" role="tablist" aria-label="Chọn nguồn dữ liệu">
+          <button id="tab-upload-btn" class="tab-btn active" role="tab" aria-selected="true" aria-controls="upload-form"
+            type="button">
+            <svg class="tab-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd"
+                d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z"
+                clip-rule="evenodd" />
+            </svg>
+            <span>Tải Video / Ảnh</span>
+          </button>
+          <button id="tab-camera-btn" class="tab-btn" role="tab" aria-selected="false" aria-controls="camera-panel"
+            type="button">
+            <svg class="tab-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z" />
+            </svg>
+            <span>Camera trực tiếp</span>
+            <span class="tab-pill">Mới</span>
+          </button>
+        </div>
+
+        <!-- Tab 1: Form upload video hoặc ảnh -->
+        <form id="upload-form" class="stage upload" novalidate role="tabpanel" aria-labelledby="tab-upload-btn">
           <label id="drop-zone" class="drop" for="file-input">
             <input id="file-input" name="file" type="file" class="visually-hidden">
             <svg class="drop-icon" viewBox="0 0 48 48" aria-hidden="true">
-              <path d="M24 31V13M16 21l8-8 8 8" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M10 30v5a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3v-5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              <path d="M24 31V13M16 21l8-8 8 8" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M10 30v5a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3v-5" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" />
             </svg>
             <span class="drop-title">Kéo thả video hoặc ảnh vào đây</span>
             <span class="drop-hint">hoặc bấm để chọn file từ máy</span>
@@ -60,13 +90,173 @@
             </fieldset>
             <button id="submit-btn" class="button light" type="submit">Bắt đầu xử lý</button>
           </div>
+
+          <!-- Tùy chọn chế độ hiển thị & tối ưu CPU -->
+          <div class="upload-options">
+            <!-- Chế độ phân tích & hiển thị -->
+            <div class="option-group">
+              <span class="option-title">Chế độ phân tích:</span>
+              <div class="option-pills">
+                <label class="pill-radio">
+                  <input type="radio" name="analysis_mode" value="realtime_overlay" checked>
+                  <span class="pill-btn">Canvas + Video trực tiếp (Khuyên dùng)</span>
+                </label>
+                <label class="pill-radio">
+                  <input type="radio" name="analysis_mode" value="legacy">
+                  <span class="pill-btn">Xuất MP4 hoàn chỉnh (Truyền thống)</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Tùy chọn con khi chọn Canvas trực tiếp -->
+            <div id="realtime-options" class="option-subgroup">
+              <div class="sub-row">
+                <span class="sub-label">Đồng bộ phát video:</span>
+                <div class="option-pills compact">
+                  <label class="pill-radio">
+                    <input type="radio" name="playback_mode" value="realtime" checked>
+                    <span class="pill-btn">Thời gian thực (bỏ frame cũ khi CPU chậm)</span>
+                  </label>
+                  <label class="pill-radio">
+                    <input type="radio" name="playback_mode" value="buffered">
+                    <span class="pill-btn">Đệm trước 2 giây (giảm trễ overlay)</span>
+                  </label>
+                </div>
+              </div>
+              <div class="sub-row">
+                <label for="cpu-preset-select" class="sub-label">Cấu hình CPU:</label>
+                <select id="cpu-preset-select" name="cpu_preset" class="styled-select">
+                  <option value="fast_cpu" selected>fast_cpu — Nhanh nhất cho CPU</option>
+                  <option value="balanced">balanced — Cân bằng tốc độ &amp; độ chính xác</option>
+                  <option value="default">default — Mặc định ban đầu</option>
+                </select>
+              </div>
+              <div class="sub-row">
+                <label for="video-speed-default" class="sub-label">Tốc độ phát video:</label>
+                <select id="video-speed-default" name="playback_rate" class="styled-select">
+                  <option value="0.25">0.25× — Rất chậm</option>
+                  <option value="0.5">0.5× — Chậm, CPU bắt nhiều frame</option>
+                  <option value="0.75">0.75× — Hơi chậm</option>
+                  <option value="1.0" selected>1.0× — Bình thường</option>
+                  <option value="1.25">1.25×</option>
+                  <option value="1.5">1.5×</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Cấu hình frame stride khi xử lý video -->
+            <div class="stride-row">
+              <label for="frame-stride-input" class="stride-label">
+                <span class="stride-title">Mỗi</span>
+                <input id="frame-stride-input" name="frame_stride" type="number" min="1" max="300" step="1" value="30"
+                  class="stride-input num" aria-describedby="stride-hint">
+                <span class="stride-unit">frame đoán 1 lần</span>
+              </label>
+              <span id="stride-hint" class="stride-hint">Số càng lớn xử lý càng nhanh; 1 = từng frame, 12 = ~2 lần/giây,
+                30 = ~1 lần/giây.</span>
+            </div>
+          </div>
           <p id="form-error" class="form-error" role="alert"></p>
 
           <div id="upload-progress" class="upload-progress" hidden>
             <div class="progress-row"><span>Đang tải file lên</span><span id="upload-pct" class="num">0%</span></div>
-            <div class="track"><div id="upload-fill" class="track-fill"></div></div>
+            <div class="track">
+              <div id="upload-fill" class="track-fill"></div>
+            </div>
           </div>
         </form>
+
+        <!-- Tab 2: Camera Trực tiếp -->
+        <section id="camera-panel" class="stage camera-stage" hidden role="tabpanel" aria-labelledby="tab-camera-btn">
+          <div class="camera-toolbar">
+            <div class="camera-controls">
+              <div class="ctrl-group">
+                <label for="cam-model" class="ctrl-label">Mô hình:</label>
+                <select id="cam-model" class="styled-select">
+                  <option value="yolo" selected>YOLO26m (Nhanh, nhẹ)</option>
+                  <option value="faster_rcnn">Faster R-CNN (Chính xác)</option>
+                </select>
+              </div>
+              <div class="ctrl-group">
+                <label for="cam-preset" class="ctrl-label">Cấu hình CPU:</label>
+                <select id="cam-preset" class="styled-select">
+                  <option value="fast_cpu" selected>fast_cpu — Tối ưu tốc độ</option>
+                  <option value="balanced">balanced — Cân bằng</option>
+                  <option value="default">default — Mặc định</option>
+                </select>
+              </div>
+              <div class="ctrl-group">
+                <label for="cam-target-fps" class="ctrl-label">Tốc độ gửi frame:</label>
+                <select id="cam-target-fps" class="styled-select">
+                  <option value="5">5 FPS (Tiết kiệm CPU)</option>
+                  <option value="10" selected>10 FPS (Khuyên dùng)</option>
+                  <option value="15">15 FPS (Mượt mà)</option>
+                </select>
+              </div>
+            </div>
+            <div class="camera-actions">
+              <button id="cam-toggle-btn" class="button light" type="button">Bật Camera</button>
+            </div>
+          </div>
+          <p id="camera-error" class="form-error" role="alert" hidden></p>
+
+          <!-- Màn hình hiển thị Camera + Lớp phủ nhận diện trực tiếp -->
+          <div class="screen camera-screen">
+            <video id="camera-video" autoplay muted playsinline></video>
+            <canvas id="camera-overlay-canvas" class="overlay-canvas"></canvas>
+            <ul id="camera-hud" class="hud" aria-label="Thông số camera trực tiếp"></ul>
+            <p id="camera-caption" class="led" aria-live="polite" hidden></p>
+            <div id="camera-placeholder" class="camera-placeholder">
+              <svg class="cam-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M4 6h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z" />
+              </svg>
+              <p class="placeholder-title">Camera đang tắt</p>
+              <p class="placeholder-desc">Bấm "Bật Camera" để cấp quyền camera và nhận diện biển báo trực tiếp từ
+                webcam/camera hành trình.</p>
+            </div>
+          </div>
+
+          <!-- Thanh điều khiển âm thanh & telemetry camera -->
+          <div id="camera-bar" class="live-bar" hidden>
+            <div class="live-bar-head">
+              <div class="live-badge">
+                <span class="live-dot" aria-hidden="true"></span>
+                <span id="camera-status-text">Camera trực tiếp đang hoạt động</span>
+              </div>
+              <div class="live-controls-row">
+                <button id="camera-cutoff-btn" class="live-action-btn active" type="button" aria-pressed="true"
+                  title="Tự ngắt giọng nói ngay khi xe đã đi qua biển báo">
+                  <span>Qua biển: Tự ngắt</span>
+                </button>
+                <label for="camera-speed-select" class="speed-select-wrap" title="Tốc độ đọc giọng nói">
+                  <span class="speed-label">Giọng nói:</span>
+                  <select id="camera-speed-select" class="styled-select speed-select">
+                    <option value="1.0">1.0×</option>
+                    <option value="1.25">1.25×</option>
+                    <option value="1.4" selected>1.4×</option>
+                    <option value="1.6">1.6×</option>
+                    <option value="1.8">1.8×</option>
+                  </select>
+                </label>
+                <button id="camera-audio-btn" class="live-audio-btn" type="button" aria-pressed="true"
+                  title="Bật/tắt giọng nói cảnh báo trực tiếp">
+                  <svg class="audio-icon on" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <path
+                      d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303zm-1.66-1.66A6.08 6.08 0 0 0 11.536 8a6.08 6.08 0 0 0-1.66-4.35l-.707.707A5.09 5.09 0 0 1 10.536 8a5.09 5.09 0 0 1-1.367 3.643zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06z" />
+                  </svg>
+                  <svg class="audio-icon off" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden>
+                    <path
+                      d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zm7.137 1.596a.5.5 0 0 1 0 .708L12.707 7l1.147 1.146a.5.5 0 0 1-.708.708L12 7.707l-1.146 1.147a.5.5 0 0 1-.708-.708L11.293 7l-1.147-1.146a.5.5 0 0 1 .708-.708L12 6.293l1.146-1.147a.5.5 0 0 1 .708 0z" />
+                  </svg>
+                  <span id="camera-audio-label">Giọng nói: Bật</span>
+                </button>
+              </div>
+            </div>
+            <p id="camera-detail" class="live-detail num"></p>
+          </div>
+        </section>
       </section>
 
       <!-- Chi tiết một job -->
@@ -77,6 +267,8 @@
             <ul id="job-meta" class="chips"></ul>
           </div>
           <div class="job-actions">
+            <button id="export-btn" class="button light" type="button" hidden
+              title="Tạo video MP4 đã vẽ sẵn khung bounding box để lưu trữ">Xuất MP4 có khung</button>
             <a id="download-link" class="button dark" href="#" hidden>Tải kết quả về máy</a>
             <button id="new-btn" class="button outline" type="button">Xử lý file khác</button>
           </div>
@@ -87,24 +279,91 @@
           <div id="progress-panel" class="processing-screen">
             <p id="stage-text" class="processing-stage"></p>
             <p id="progress-pct" class="processing-pct num"></p>
-            <div class="track"><div id="progress-fill" class="track-fill"></div></div>
+            <div class="track">
+              <div id="progress-fill" class="track-fill"></div>
+            </div>
             <p id="progress-detail" class="processing-detail num"></p>
           </div>
 
           <div id="error-panel" class="error-panel" role="alert" hidden>
             <p class="error-title">Không xử lý được file này</p>
             <p id="error-message" class="error-message"></p>
-            <p class="stage-hint">Kiểm tra file có mở được bằng trình phát video trên máy không, rồi thử lại. Nếu lỗi nhắc tới
-              <code>NotImplementedError</code> thì phần đó của nhóm chưa hiện thực xong.</p>
+            <p class="stage-hint">Kiểm tra file có mở được bằng trình phát video trên máy không, rồi thử lại.</p>
           </div>
 
           <div id="result" hidden>
             <div class="screen">
               <video id="result-video" controls playsinline preload="metadata"></video>
+              <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
               <img id="result-image" alt="Ảnh kết quả đã đánh dấu biển báo" hidden>
+              <img id="live-stream" alt="Luồng video đang nhận diện trực tiếp" hidden>
               <ul id="hud" class="hud" aria-label="Thông số xử lý"></ul>
               <!-- Câu cảnh báo hiện như bảng LED trên cao tốc, đúng lúc giọng nói phát -->
               <p id="caption" class="led" aria-live="polite" hidden></p>
+            </div>
+
+            <!-- Thanh chỉnh tốc độ phát video (hoạt động cả realtime & xem lại) -->
+            <div id="video-speed-bar" class="video-speed-bar" hidden>
+              <span class="video-speed-title">Tốc độ video:</span>
+              <div id="video-speed-group" class="video-speed-group" role="group" aria-label="Chỉnh tốc độ phát video">
+                <button type="button" class="video-speed-btn" data-rate="0.25" aria-pressed="false">0.25×</button>
+                <button type="button" class="video-speed-btn" data-rate="0.5" aria-pressed="false">0.5×</button>
+                <button type="button" class="video-speed-btn" data-rate="0.75" aria-pressed="false">0.75×</button>
+                <button type="button" class="video-speed-btn active" data-rate="1.0" aria-pressed="true">1.0×</button>
+                <button type="button" class="video-speed-btn" data-rate="1.25" aria-pressed="false">1.25×</button>
+                <button type="button" class="video-speed-btn" data-rate="1.5" aria-pressed="false">1.5×</button>
+              </div>
+              <span class="video-speed-hint">Phát chậm giúp CPU nhận diện kịp nhiều frame hơn</span>
+            </div>
+
+            <!-- Dải điều khiển & tiến độ trực tiếp khi đang xử lý video -->
+            <div id="live-bar" class="live-bar" hidden>
+              <div class="live-bar-head">
+                <div class="live-badge">
+                  <span class="live-dot" aria-hidden="true"></span>
+                  <span id="live-status-text">Đang xử lý &amp; phát trực tiếp</span>
+                </div>
+                <div class="live-controls-row">
+                  <button id="live-mode-toggle-btn" class="live-action-btn" type="button"
+                    title="Chuyển đổi giữa chế độ thời gian thực và đệm trước" hidden>
+                    <span>Chế độ: Thời gian thực</span>
+                  </button>
+                  <button id="cancel-job-btn" class="live-action-btn danger" type="button"
+                    title="Dừng và hủy phiên phân tích video hiện tại" hidden>
+                    <span>Hủy phân tích</span>
+                  </button>
+                  <button id="live-cutoff-btn" class="live-action-btn active" type="button" aria-pressed="true"
+                    title="Tự ngắt giọng nói ngay khi xe đã đi qua biển báo">
+                    <span>Qua biển: Tự ngắt</span>
+                  </button>
+                  <label for="live-speed-select" class="speed-select-wrap" title="Tốc độ đọc giọng nói">
+                    <span class="speed-label">Giọng nói:</span>
+                    <select id="live-speed-select" class="styled-select speed-select">
+                      <option value="1.0">1.0×</option>
+                      <option value="1.25">1.25×</option>
+                      <option value="1.4" selected>1.4×</option>
+                      <option value="1.6">1.6×</option>
+                      <option value="1.8">1.8×</option>
+                    </select>
+                  </label>
+                  <button id="live-audio-btn" class="live-audio-btn" type="button" aria-pressed="true"
+                    title="Bật/tắt giọng nói cảnh báo trực tiếp">
+                    <svg class="audio-icon on" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      <path
+                        d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303zm-1.66-1.66A6.08 6.08 0 0 0 11.536 8a6.08 6.08 0 0 0-1.66-4.35l-.707.707A5.09 5.09 0 0 1 10.536 8a5.09 5.09 0 0 1-1.367 3.643zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06z" />
+                    </svg>
+                    <svg class="audio-icon off" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden>
+                      <path
+                        d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zm7.137 1.596a.5.5 0 0 1 0 .708L12.707 7l1.147 1.146a.5.5 0 0 1-.708.708L12 7.707l-1.146 1.147a.5.5 0 0 1-.708-.708L11.293 7l-1.147-1.146a.5.5 0 0 1 .708-.708L12 6.293l1.146-1.147a.5.5 0 0 1 .708 0z" />
+                    </svg>
+                    <span id="live-audio-label">Giọng nói: Bật</span>
+                  </button>
+                </div>
+              </div>
+              <div class="track">
+                <div id="live-fill" class="track-fill"></div>
+              </div>
+              <p id="live-detail" class="live-detail num"></p>
             </div>
 
             <div id="road-wrap" class="road-wrap">
@@ -119,12 +378,24 @@
           </div>
         </div>
 
-        <!-- Một dải số liệu chia 4 cột bằng đường kẻ mảnh (hình minh hoạ vẽ bằng SVG trong app.js) -->
+        <!-- Một dải số liệu chia 4 cột bằng đường kẻ mảnh -->
         <section id="insights" class="panel insights" hidden aria-label="Số liệu xử lý">
-          <div class="insight"><h2>Tốc độ xử lý</h2><div id="ins-speed" class="insight-body"></div></div>
-          <div class="insight"><h2>Vị trí biển báo</h2><div id="ins-position" class="insight-body"></div></div>
-          <div class="insight"><h2>Thời gian từng bước</h2><div id="ins-timing" class="insight-body"></div></div>
-          <div class="insight"><h2>Mật độ biển báo</h2><div id="ins-density" class="insight-body"></div></div>
+          <div class="insight">
+            <h2>Tốc độ xử lý</h2>
+            <div id="ins-speed" class="insight-body"></div>
+          </div>
+          <div class="insight">
+            <h2>Vị trí biển báo</h2>
+            <div id="ins-position" class="insight-body"></div>
+          </div>
+          <div class="insight">
+            <h2>Thời gian từng bước</h2>
+            <div id="ins-timing" class="insight-body"></div>
+          </div>
+          <div class="insight">
+            <h2>Mật độ biển báo</h2>
+            <div id="ins-density" class="insight-body"></div>
+          </div>
         </section>
 
         <section id="events-card" class="panel events-card" hidden aria-labelledby="events-title">
@@ -144,4 +415,5 @@
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
+
 </html>

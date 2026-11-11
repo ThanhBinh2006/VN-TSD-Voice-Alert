@@ -1,13 +1,36 @@
-"""Augmentation nhãn thiểu số trong tập train (cắt an toàn, zoom, blur nhẹ, không xoay)."""
+"""Augmentation nhãn thiểu số trong tập train (cắt an toàn, zoom, blur rất nhẹ, không xoay)."""
 from __future__ import annotations
 
 import random
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from collections import defaultdict, Counter
 import cv2
 import numpy as np
+
+
+def compute_adaptive_class_target(cnt: int) -> int:
+    """Tính mục tiêu số box theo mức ưu tiên của lớp.
+
+    Từ 100 box: giữ nguyên; 50–99: nhân 1.5; 20–49: nhân 1.75;
+    dưới 20: nhân 2.5. Kết quả dùng quy tắc làm tròn của Python.
+    """
+    if cnt >= 100:
+        return cnt
+    if cnt >= 50:
+        return int(round(cnt * 1.5))
+    if cnt >= 20:
+        return int(round(cnt * 1.75))
+    return int(round(cnt * 2.5))
+
+
+def compute_adaptive_class_targets(class_counts: Mapping[int, int]) -> dict[int, int]:
+    """Tính mục tiêu adaptive cho từng class_id từ số box hiện có."""
+    return {
+        cid: compute_adaptive_class_target(cnt)
+        for cid, cnt in class_counts.items()
+    }
 
 
 def _read_raw_labels(p: Path) -> list[tuple[int, float, float, float, float]]:
@@ -101,7 +124,7 @@ def transform_and_letterbox_crop(
     min_box_px: int = 8,
     pad_value: int = 114,
 ) -> tuple[np.ndarray, tuple[int, float, float, float, float]] | tuple[None, None]:
-    """Cắt vùng biển báo, zoom, blur nhẹ và letterbox về target_size (không xoay)."""
+    """Cắt, zoom, blur rất nhẹ (15%, sigma 0.25–0.50) và letterbox, không xoay."""
     H, W = img.shape[:2]
     cid, t_cx, t_cy, t_bw, t_bh = target_box
     bx1 = (t_cx - t_bw / 2.0) * W
@@ -148,9 +171,9 @@ def transform_and_letterbox_crop(
     if (nbx2 - nbx1) < min_box_px or (nby2 - nby1) < min_box_px:
         return None, None
 
-    # Làm mờ nhẹ (xác suất 35%, kernel 3x3) & chỉnh sáng nhẹ
-    if rng.random() < 0.35:
-        sigma = rng.uniform(0.6, 1.0)
+    # Làm mờ rất nhẹ (xác suất 15%, kernel 3x3, sigma 0.25–0.50) & chỉnh sáng nhẹ
+    if rng.random() < 0.15:
+        sigma = rng.uniform(0.25, 0.50)
         transformed_crop = cv2.GaussianBlur(transformed_crop, (3, 3), sigmaX=sigma, sigmaY=sigma)
 
     alpha = rng.uniform(0.88, 1.15)
@@ -196,16 +219,20 @@ def augment_minority_classes(
     image_size: tuple[int, int] = (640, 640),
     min_box_px: int = 8,
     pad_value: int = 114,
-    max_augmented_per_class: int = 7,
+    max_augmented_per_class: int | None = None,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Cân bằng dữ liệu cho các lớp trong tập Train (tối đa 7 ảnh/lớp, không xoay)."""
+    """Cân bằng dữ liệu cho các lớp trong tập Train, không xoay.
+
+    max_augmented_per_class=None không giới hạn số ảnh thêm mỗi lớp;
+    số nguyên dương đặt trần số ảnh thêm mỗi lớp.
+    """
     rng = random.Random(seed)
     if not train_img_dir.is_dir() or not train_lbl_dir.is_dir():
         return {"n_augmented_images": 0, "n_augmented_boxes": 0}
 
     base_lbl_paths = sorted([p for p in train_lbl_dir.glob("*.txt") if not ("_aug" in p.stem)])
-    
+
     img_boxes: dict[str, list[tuple[int, float, float, float, float]]] = {}
     class_candidates: dict[int, list[tuple[str, tuple[int, float, float, float, float], tuple[float, float, float, float]]]] = defaultdict(list)
     class_counts: Counter[int] = Counter()
@@ -230,14 +257,7 @@ def augment_minority_classes(
     policy_str = str(target_min_boxes).strip().lower() if target_min_boxes is not None else "adaptive"
 
     if policy_str in ("adaptive", "ratio", "tier", "multiplier"):
-        for cid, cnt in class_counts.items():
-            if cnt < 30:
-                target_cnt = max(int(round(cnt * 2.5)), min(15, cnt * 3))
-            elif cnt <= 150:
-                target_cnt = int(round(cnt * 1.75))
-            else:
-                target_cnt = cnt
-            class_targets[cid] = target_cnt
+        class_targets = compute_adaptive_class_targets(class_counts)
     elif policy_str in ("max", "-1", "none"):
         max_count = max(class_counts.values())
         for cid in class_counts:
@@ -247,9 +267,13 @@ def augment_minority_classes(
         for cid, cnt in class_counts.items():
             class_targets[cid] = max(cnt, fixed_target)
 
-    # Giới hạn tối đa không quá max_augmented_per_class (mặc định 7) ảnh cộng thêm mỗi class
+    # Chỉ áp dụng trần ảnh cộng thêm mỗi class khi max_augmented_per_class khác None
     class_needed = {
-        c: min(class_targets[c] - class_counts[c], max_augmented_per_class)
+        c: (
+            class_targets[c] - class_counts[c]
+            if max_augmented_per_class is None
+            else min(class_targets[c] - class_counts[c], max_augmented_per_class)
+        )
         for c in class_counts
         if class_targets[c] > class_counts[c]
     }
@@ -258,11 +282,17 @@ def augment_minority_classes(
         return {"n_augmented_images": 0, "n_augmented_boxes": 0}
 
     total_needed = sum(class_needed.values())
-    print(f"[augment] Bắt đầu tăng cường cho {len(class_needed)} lớp trong Train (trần: {max_augmented_per_class} ảnh/lớp, cần sinh thêm ~{total_needed:,} box)...")
+    limit_str = (
+        "không giới hạn"
+        if max_augmented_per_class is None
+        else f"{max_augmented_per_class} ảnh/lớp"
+    )
+    print(f"[augment] Bắt đầu tăng cường cho {len(class_needed)} lớp trong Train (trần: {limit_str}, cần sinh thêm ~{total_needed:,} box)...")
 
     popcount = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
     img_cache: dict[str, np.ndarray] = {}
+
     def get_img(st: str) -> np.ndarray | None:
         if st in img_cache:
             return img_cache[st]

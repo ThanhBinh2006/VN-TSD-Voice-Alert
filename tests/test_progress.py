@@ -1,12 +1,14 @@
 """Test tiến độ % của job (Thành viên 3): ProgressTracker, _TrackingStore và trường "progress" trong API."""
 import io
+import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from app.fake import FakeDetector
-from app.jobs import ProgressTracker, _TrackingStore
+from app.jobs import LiveFrameBuffer, ProgressTracker, _TrackingStore
 from app.main import create_app
 from app.store_memory import InMemoryStore
 from ts_alert.runtime import video_io
@@ -26,8 +28,14 @@ def _video_bytes(tmp_path, n=N_FRAMES, fps=10.0, w=96, h=64):
 def app_and_log(tmp_path):
     """App chạy job đồng bộ; detector ghi lại tiến độ mà API trả về TẠI MỖI khung hình."""
     out = tmp_path / "outputs"
-    overrides = {"paths": {"outputs_dir": str(out), "uploads_dir": str(out / "uploads"),
-                           "db_path": str(out / "test.db")}}
+    overrides = {
+        "paths": {
+            "outputs_dir": str(out),
+            "uploads_dir": str(out / "uploads"),
+            "db_path": str(out / "test.db"),
+        },
+        "inference": {"frame_stride": 1},
+    }
     app = create_app(fake=True, store=InMemoryStore(), sync=True, overrides=overrides)
     runner = app.extensions["tsd"]["runner"]
     seen = []
@@ -131,3 +139,122 @@ def test_loading_model_stage_only_on_first_job(app_and_log, tmp_path):
     _upload(client, video, "b.mp4")
     assert stages_when_loading == ["loading_model"]        # chỉ nạp 1 lần cho 2 job
     assert runner.loaded_models() == ["yolo"]
+
+
+def test_progress_with_frame_stride(tmp_path: Path) -> None:
+    """Stride 10 chỉ inference ba lần nhưng tiến độ vẫn tính đủ 30 frame."""
+    out = tmp_path / "outputs"
+    overrides = {
+        "paths": {
+            "outputs_dir": str(out),
+            "uploads_dir": str(out / "uploads"),
+            "db_path": str(out / "test.db"),
+        },
+        "inference": {"frame_stride": 10},
+    }
+    app = create_app(
+        fake=True,
+        store=InMemoryStore(),
+        sync=True,
+        overrides=overrides,
+    )
+    runner = app.extensions["tsd"]["runner"]
+    predicted_frames: list[int] = []
+
+    class SpyDetector(FakeDetector):
+        """Ghi lại vị trí inference thông qua số frame đã xử lý."""
+
+        def predict(self, frame: np.ndarray) -> list:
+            """Ghi nhận lần inference rồi gọi detector giả."""
+            progress = runner.progress.get(1)
+            assert progress is not None
+            predicted_frames.append(progress["frames_done"])
+            return super().predict(frame)
+
+    runner.detector_factory = lambda name, cfg: SpyDetector()
+
+    try:
+        client = app.test_client()
+        response = _upload(client, _video_bytes(tmp_path), "stride.mp4")
+        job_id = response.get_json()["job_id"]
+
+        assert len(predicted_frames) == 3
+        assert predicted_frames == [0, 10, 20]
+
+        progress = client.get(f"/api/jobs/{job_id}").get_json()["progress"]
+        assert progress["stage"] == "done"
+        assert progress["percent"] == 100.0
+        assert progress["frames_done"] == N_FRAMES
+        assert progress["frame_stride"] == 10
+        assert progress["video_fps"] is not None and progress["video_fps"] > 0
+        assert progress["duration_sec"] is not None and progress["duration_sec"] > 0
+    finally:
+        runner.shutdown()
+        app.extensions["tsd"]["restore_fakes"]()
+
+
+def test_live_frame_buffer_streams_and_unblocks_on_shutdown() -> None:
+    """Kiểm tra JPEG, kết thúc MJPEG, giới hạn slot và đánh thức khi shutdown."""
+    buffer = LiveFrameBuffer(max_jobs=2)
+    threads: list[threading.Thread] = []
+
+    def collect_stream(job_id: int, chunks: list[bytes]) -> None:
+        """Đọc hết stream; heartbeat dài giúp phát hiện thiếu notify."""
+        chunks.extend(buffer.iter_mjpeg(job_id, heartbeat_sec=30.0))
+
+    try:
+        buffer.init_job(1)
+        assert buffer.has_slot(1)
+        assert buffer.latest_frame(1) is None
+
+        frame = np.zeros((32, 48, 3), dtype=np.uint8)
+        frame[:, :, 2] = 255
+        buffer.publish(1, frame, frame_index=0, timestamp_sec=0.0)
+
+        jpeg = buffer.latest_frame(1)
+        assert jpeg is not None
+        assert jpeg.startswith(b"\xff\xd8")
+
+        buffer.mark_finished(1)
+        chunks: list[bytes] = []
+        finished_reader = threading.Thread(
+            target=collect_stream,
+            args=(1, chunks),
+            daemon=True,
+        )
+        threads.append(finished_reader)
+        finished_reader.start()
+        finished_reader.join(timeout=2.0)
+
+        assert not finished_reader.is_alive()
+        assert len(chunks) == 1
+        assert chunks[0].startswith(b"--frame\r\n")
+        assert b"Content-Type: image/jpeg\r\n" in chunks[0]
+        assert jpeg in chunks[0]
+
+        buffer.init_job(2)
+        buffer.init_job(3)
+        assert not buffer.has_slot(1)
+        assert buffer.latest_frame(1) is None
+        assert buffer.has_slot(2)
+        assert buffer.has_slot(3)
+
+        waiting_chunks: list[bytes] = []
+        waiting_reader = threading.Thread(
+            target=collect_stream,
+            args=(2, waiting_chunks),
+            daemon=True,
+        )
+        threads.append(waiting_reader)
+        waiting_reader.start()
+        waiting_reader.join(timeout=0.05)
+        assert waiting_reader.is_alive()
+
+        buffer.shutdown()
+        waiting_reader.join(timeout=2.0)
+        assert not waiting_reader.is_alive()
+        assert waiting_chunks == []
+    finally:
+        buffer.shutdown()
+        for thread in threads:
+            thread.join(timeout=2.0)

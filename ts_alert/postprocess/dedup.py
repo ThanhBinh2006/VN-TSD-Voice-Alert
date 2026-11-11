@@ -5,9 +5,21 @@ from ts_alert.types import Detection, SpeechEvent
 
 
 class Deduplicator:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict) -> None:
+        """Khởi tạo bộ chống cảnh báo lặp theo cấu hình."""
         self.iou_match = cfg["postprocess"]["dedup"]["iou_match"]
         self.lost_frames = cfg["postprocess"]["dedup"]["lost_frames"]
+
+        frame_stride = (cfg.get("inference") or {}).get("frame_stride", 1)
+        if frame_stride is None:
+            frame_stride = 1
+        if isinstance(frame_stride, bool):
+            raise ValueError("inference.frame_stride không được là bool.")
+
+        self.frame_stride = int(frame_stride)
+        if self.frame_stride < 1:
+            raise ValueError("inference.frame_stride phải >= 1.")
+
         self.reset()
 
     def reset(self) -> None:
@@ -51,19 +63,21 @@ class Deduplicator:
         Gợi ý: một detection là "cùng biển" với track cũ nếu cùng label và IoU > iou_match;
         track bị xoá khi vắng quá lost_frames khung hình (biển xuất hiện lại sau đó = biển mới).
         """
+        effective_lost_frames = max(self.lost_frames, self.frame_stride)
+
         # 1. Xoá các track đã biến mất quá lâu.
         self.tracks = [
             track
             for track in self.tracks
-            if frame_index - track["last_seen"] <= self.lost_frames
+            if frame_index - track["last_seen"] <= effective_lost_frames
         ]
 
         events: list[SpeechEvent] = []
-        matched_track_indexes = set()
+        matched_track_indexes: set[int] = set()
 
         # 2. Xử lý từng detection của frame hiện tại.
         for detection in detections:
-            best_track_index = None
+            best_track_index: int | None = None
             best_iou = 0.0
 
             for track_index, track in enumerate(self.tracks):

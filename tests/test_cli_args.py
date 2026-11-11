@@ -39,4 +39,4 @@ def test_shared_keys_present():
     cfg = resolve_config("faster_rcnn", "local")
     for key in ("early_stopping_patience", "amp", "primary_metric", "batch_size", "require_wandb", "run_name"):
         assert key in cfg["train"]
-    assert cfg["eval"]["batch_size"] == 16 and cfg["eval"]["auto_eval_test"] is True
+    assert cfg["train"]["batch_size"] == 32 and cfg["eval"]["batch_size"] == 32 and cfg["eval"]["auto_eval_test"] is True

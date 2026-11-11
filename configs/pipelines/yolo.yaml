@@ -1,19 +1,16 @@
 # Owner: Thành viên 1 — pipeline YOLO + preprocessing online.
 # Online ops bên dưới chỉ chạy khi enabled: true.
-# KHÔNG đặt train.batch_size / eval.batch_size ở đây. Cả hai lấy từ configs/shared.yaml.
+# KHÔNG đặt train.batch_size / train.epochs / eval.batch_size ở đây. Các khóa dùng chung lấy từ configs/shared.yaml.
 pipeline: yolo
 inherits: configs/shared.yaml
 
 model:
-  family: yolo
   name: yolo26m                 # ultralytics==8.4.175
   pretrained: yolo26m.pt
   weights: models/yolo/best.pt  # checkpoint fine-tune dùng cho web app / suy luận
 
 train:
-  epochs: 100                    # Thống nhất 100 epochs cho cả hai mô hình
   lr: 0.01
-  lr0: 0.01                     # Hỗ trợ cả lr và lr0
   optimizer: auto               # auto, SGD, Adam, AdamW
   # Optimization hyperparameters
   momentum: 0.937               # Momentum của optimizer (SGD momentum / Adam beta1)
@@ -23,16 +20,43 @@ train:
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
-  enabled: false
-  letterbox: true
-  normalize: true
+  enabled: true
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
   # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
   mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation
   mixup: 0.15                   # Xác suất sử dụng MixUp
   scale: 0.5                    # Mức độ thay đổi tỷ lệ ảnh (+/- fraction)
-  degrees: 0.0                  # Góc xoay ảnh (+/- deg)
   translate: 0.1                # Mức độ dịch chuyển ảnh (+/- fraction)
   hsv_h: 0.015                  # Biến đổi sắc độ Hue (0.0 - 1.0)
   hsv_s: 0.7                    # Biến đổi độ bão hòa Saturation (0.0 - 1.0)
   hsv_v: 0.4                    # Biến đổi độ sáng Brightness (0.0 - 1.0)
+  occlusion_p: 0.30             # Xác suất áp dụng che khuất một phần góc/cạnh trên mỗi ảnh khi train (0.0 = tắt)
+  occlusion_ratio: 0.30         # Tỉ lệ độ bị che phủ theo góc/cạnh của từng box (0.05 - 0.90)
+
+sweep:                          # Không gian tìm kiếm siêu tham số (tuân thủ không ghi đè shared.yaml)
+  parameters:
+    train.lr:
+      distribution: log_uniform_values
+      min: 0.0001
+      max: 0.02
+    train.optimizer:
+      values: [SGD, AdamW]
+    # train.momentum:
+    #   distribution: uniform
+    #   min: 0.9
+    #   max: 0.937
+    # train.weight_decay:
+    #   distribution: log_uniform_values
+    #   min: 0.0001
+    #   max: 0.001
+    # train.warmup_epochs:
+    #   distribution: uniform
+    #   min: 1.0
+    #   max: 5.0
+    # online_preprocess.enabled:
+    #   values: [false, true]
+    # online_preprocess.occlusion_p:
+    #   values: [0.0, 0.3, 0.5]
+    # online_preprocess.occlusion_ratio:
+    #   values: [0.2, 0.3, 0.45]
+

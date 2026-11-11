@@ -63,7 +63,7 @@ def class_distribution(data_root: Path, class_table: str | Path | None = None) -
     lbl_dir = data_root / "labels" if (data_root / "labels").is_dir() else data_root
     boxes = read_yolo_labels(lbl_dir)
     out_path = out_dir / "01_class_distribution.png"
-    plot_class_distribution(boxes, classes, out_path, is_raw=True)
+    plot_class_distribution(boxes, classes, out_path, tag="raw")
     return out_path
 
 
@@ -100,6 +100,7 @@ def main(argv=None) -> None:
     p.add_argument("--min-box-px", type=int, default=8, help="Ngưỡng tiny box (default: 8)")
     p.add_argument("--num-samples", type=int, default=9, help="Số ảnh mẫu vẽ demo nhãn (default: 9)")
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
+    p.add_argument("--blur-threshold", type=float, default=50.0, help="Ngưỡng Laplacian variance xác định ảnh mờ (default: 50.0)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
     p.add_argument("--dhash-hamming", type=int, default=380, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 380)")
     args = p.parse_args(argv)
@@ -125,6 +126,7 @@ def main(argv=None) -> None:
             min_box_px=args.min_box_px,
             num_samples=args.num_samples,
             quality_samples=args.quality_samples,
+            blur_threshold=args.blur_threshold,
             dhash_size=args.dhash_size,
             dhash_hamming=dhash_h,
         )
@@ -137,6 +139,7 @@ def main(argv=None) -> None:
             min_box_px=args.min_box_px,
             num_samples=args.num_samples,
             quality_samples=args.quality_samples,
+            blur_threshold=args.blur_threshold,
             dhash_size=args.dhash_size,
             dhash_hamming=args.dhash_hamming,
         )
