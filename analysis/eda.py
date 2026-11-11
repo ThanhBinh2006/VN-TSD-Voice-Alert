@@ -63,7 +63,7 @@ def class_distribution(data_root: Path, class_table: str | Path | None = None) -
     lbl_dir = data_root / "labels" if (data_root / "labels").is_dir() else data_root
     boxes = read_yolo_labels(lbl_dir)
     out_path = out_dir / "01_class_distribution.png"
-    plot_class_distribution(boxes, classes, out_path, is_raw=True)
+    plot_class_distribution(boxes, classes, out_path, tag="raw")
     return out_path
 
 
