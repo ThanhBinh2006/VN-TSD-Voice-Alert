@@ -61,6 +61,10 @@ const state = {
   maxUploadMb: 200,
   defaultFrameStride: 30,
 
+  // Tốc độ phát video
+  videoPlaybackRate: 1.0,
+  userCustomVideoSpeed: false,
+
   // Tốc độ giọng nói và chế độ ngắt khi qua biển
   voicePlaybackRate: 1.4,
   userCustomSpeed: false,
@@ -177,6 +181,81 @@ function svg(tag, attrs = {}, text) {
   return node;
 }
 
+/* ------------------------------------------------------------------ điều khiển tốc độ phát video */
+
+function applyVideoPlaybackRate(videoEl, rate = state.videoPlaybackRate) {
+  if (!videoEl) return;
+  const r = Math.min(4.0, Math.max(0.1, Number(rate) || 1.0));
+  try {
+    videoEl.defaultPlaybackRate = r;
+    videoEl.playbackRate = r;
+    videoEl.preservesPitch = true;
+    videoEl.mozPreservesPitch = true;
+    videoEl.webkitPreservesPitch = true;
+  } catch (_) { }
+}
+
+function updateVideoSpeedButtons(rate) {
+  const r = Number(rate) || 1.0;
+  const group = $("video-speed-group");
+  if (group) {
+    group.querySelectorAll(".video-speed-btn").forEach((btn) => {
+      const btnRate = parseFloat(btn.dataset.rate || "1.0");
+      const isActive = Math.abs(btnRate - r) < 0.05;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+  const defSel = $("video-speed-default");
+  if (defSel) {
+    for (const opt of defSel.options) {
+      if (Math.abs(parseFloat(opt.value) - r) < 0.05) {
+        defSel.value = opt.value;
+        break;
+      }
+    }
+  }
+}
+
+function syncVideoSpeedBarVisibility() {
+  const bar = $("video-speed-bar");
+  if (!bar) return;
+  const result = $("result");
+  const video = $("result-video");
+  const isResultVisible = result && !result.hidden;
+  const isVideoVisible = video && !video.hidden;
+  const isStreamActive = Boolean(state.activeStreamJobId);
+  const shouldShow = isResultVisible && isVideoVisible && !isStreamActive;
+  bar.hidden = !shouldShow;
+}
+
+function setVideoPlaybackRate(rate, syncBackend = true) {
+  const r = Math.min(4.0, Math.max(0.1, Number(rate) || 1.0));
+  state.videoPlaybackRate = r;
+  state.userCustomVideoSpeed = true;
+  updateVideoSpeedButtons(r);
+
+  const video = $("result-video");
+  const prevRate = video ? (video.playbackRate || 1.0) : null;
+  if (video) {
+    applyVideoPlaybackRate(video, r);
+  }
+
+  const handledByRateChange = Boolean(
+    video &&
+    prevRate !== null &&
+    Math.abs((video.playbackRate || 1.0) - prevRate) > 1e-4 &&
+    state.playbackSyncAbort
+  );
+  if (syncBackend && !handledByRateChange && state.jobId && state.job && (state.job.status === "processing" || state.job.status === "queued")) {
+    fetch(`/api/jobs/${state.jobId}/playback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playback_rate: r }),
+    }).catch(() => {});
+  }
+}
+
 /* ------------------------------------------------------------------ điều khiển tốc độ & tự ngắt khi qua biển */
 
 function updateSpeedSelects(rate) {
@@ -199,10 +278,10 @@ function setVoicePlaybackRate(rate) {
   updateSpeedSelects(numRate);
 
   if (state.currentAudio) {
-    try { state.currentAudio.playbackRate = numRate; } catch (_) {}
+    try { state.currentAudio.playbackRate = numRate; } catch (_) { }
   }
   if (state.cameraCurrentAudio) {
-    try { state.cameraCurrentAudio.playbackRate = numRate; } catch (_) {}
+    try { state.cameraCurrentAudio.playbackRate = numRate; } catch (_) { }
   }
 }
 
@@ -256,14 +335,14 @@ function unlockAudio() {
     if (AudioCtx) {
       if (!state.audioCtx) state.audioCtx = new AudioCtx();
       if (state.audioCtx.state === "suspended") {
-        state.audioCtx.resume().catch(() => {});
+        state.audioCtx.resume().catch(() => { });
       }
     }
     const silent = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
     silent.volume = 0;
     const p = silent.play();
-    if (p && p.then) p.catch(() => {});
-  } catch (_) {}
+    if (p && p.then) p.catch(() => { });
+  } catch (_) { }
 }
 
 function applyAudioPlaybackRate(audio) {
@@ -364,7 +443,7 @@ function interruptCurrentVideoAudio() {
     try {
       audio.pause();
       audio.removeAttribute("src");
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // Phát tiếp câu tiếp theo trong hàng đợi nếu còn
@@ -461,7 +540,7 @@ function stopLiveAudio() {
     try {
       state.currentAudio.pause();
       state.currentAudio.removeAttribute("src");
-    } catch (_) {}
+    } catch (_) { }
     state.currentAudio = null;
     state.currentAudioMeta = null;
   }
@@ -562,7 +641,7 @@ function interruptCurrentCameraAudio() {
     try {
       audio.pause();
       audio.removeAttribute("src");
-    } catch (_) {}
+    } catch (_) { }
   }
 
   playNextCameraAudio();
@@ -652,7 +731,7 @@ function stopCameraAudio() {
     try {
       state.cameraCurrentAudio.pause();
       state.cameraCurrentAudio.removeAttribute("src");
-    } catch (_) {}
+    } catch (_) { }
     state.cameraCurrentAudio = null;
     state.cameraCurrentAudioMeta = null;
   }
@@ -1008,7 +1087,7 @@ function clearJobArtifacts() {
     try {
       state.manualAudio.pause();
       state.manualAudio.removeAttribute("src");
-    } catch (_) {}
+    } catch (_) { }
     state.manualAudio = null;
   }
 
@@ -1019,6 +1098,8 @@ function clearJobArtifacts() {
   const video = $("result-video");
   video.pause();
   video.removeAttribute("src");
+  video.defaultPlaybackRate = 1.0;
+  video.playbackRate = 1.0;
   video.load();
 
   const canvas = $("overlay-canvas");
@@ -1051,6 +1132,9 @@ function clearJobArtifacts() {
   const modeBtn = $("live-mode-toggle-btn");
   if (modeBtn) modeBtn.hidden = true;
 
+  const speedBar = $("video-speed-bar");
+  if (speedBar) speedBar.hidden = true;
+
   const playhead = $("road") ? $("road").querySelector(".playhead") : null;
   if (playhead) playhead.style.setProperty("--p", 0);
 }
@@ -1060,7 +1144,7 @@ function clearJobArtifacts() {
 function teardownCamera() {
   if (state.cameraStream) {
     state.cameraStream.getTracks().forEach((track) => {
-      try { track.stop(); } catch (_) {}
+      try { track.stop(); } catch (_) { }
     });
     state.cameraStream = null;
   }
@@ -1088,7 +1172,7 @@ function teardownCamera() {
   resetCameraTrackState();
 
   if (state.cameraSession && state.cameraSession.stop_url) {
-    fetch(state.cameraSession.stop_url, { method: "POST" }).catch(() => {});
+    fetch(state.cameraSession.stop_url, { method: "POST" }).catch(() => { });
   }
   state.cameraSession = null;
 
@@ -1168,7 +1252,7 @@ async function startCameraSession() {
   state.cameraStream = stream;
   const camVideo = $("camera-video");
   camVideo.srcObject = stream;
-  await camVideo.play().catch(() => {});
+  await camVideo.play().catch(() => { });
 
   const placeholder = $("camera-placeholder");
   if (placeholder) placeholder.hidden = true;
@@ -1241,7 +1325,7 @@ async function startCameraSession() {
         if (st === "stopped" || st === "failed" || st === "closed" || st === "cancelled") {
           teardownCamera();
         }
-      } catch (_) {}
+      } catch (_) { }
     });
 
     es.addEventListener("overlay", (e) => {
@@ -1251,7 +1335,7 @@ async function startCameraSession() {
           state.cameraRenderer.addKeyframe(payload);
           state.cameraRenderer.renderCurrent();
         }
-      } catch (_) {}
+      } catch (_) { }
     });
 
     es.addEventListener("alert", (e) => {
@@ -1260,7 +1344,7 @@ async function startCameraSession() {
         if (alertData.status === "ready" && alertData.audio_url) {
           enqueueCameraAudio(alertData);
         }
-      } catch (_) {}
+      } catch (_) { }
     });
 
     es.addEventListener("track_lost", (e) => {
@@ -1270,14 +1354,14 @@ async function startCameraSession() {
           state.cameraTrackState.lostTracks.set(data.track_id, performance.now());
           pruneAndInterruptCameraAudio();
         }
-      } catch (_) {}
+      } catch (_) { }
     });
 
     es.addEventListener("telemetry", (e) => {
       try {
         const telem = JSON.parse(e.data);
         renderCameraTelemetry(telem);
-      } catch (_) {}
+      } catch (_) { }
     });
   }
 
@@ -1437,6 +1521,15 @@ async function loadHealth() {
     }
     if (ttsCfg.cutoff_grace_sec != null) {
       state.cutoffGraceSec = Number(ttsCfg.cutoff_grace_sec) || 0.25;
+    }
+
+    // Đọc cấu hình tốc độ video từ health nếu người dùng chưa tự chỉnh
+    const videoRateHealth = (h.realtime && h.realtime.video_playback_rate != null)
+      ? h.realtime.video_playback_rate
+      : (ttsCfg.video_playback_rate != null ? ttsCfg.video_playback_rate : null);
+    if (!state.userCustomVideoSpeed && videoRateHealth != null) {
+      state.videoPlaybackRate = Number(videoRateHealth) || 1.0;
+      updateVideoSpeedButtons(state.videoPlaybackRate);
     }
 
     if (h.fake) {
@@ -1601,6 +1694,15 @@ function setupUpload() {
       }
     }
 
+    const defSpeedSel = $("video-speed-default");
+    if (defSpeedSel) {
+      const chosenRate = parseFloat(defSpeedSel.value);
+      if (Number.isFinite(chosenRate) && chosenRate > 0) {
+        state.videoPlaybackRate = chosenRate;
+        state.userCustomVideoSpeed = true;
+      }
+    }
+
     unlockAudio();
     uploadFile(new FormData(form));
   });
@@ -1634,6 +1736,7 @@ function uploadFile(formData) {
         delete strideInput.dataset.userEdited;
         strideInput.value = String(state.defaultFrameStride ?? 30);
       }
+      updateVideoSpeedButtons(state.videoPlaybackRate || 1.0);
       location.hash = `#/job/${body.job_id}`;
       loadHistory();
     } else if (xhr.status === 0) {
@@ -1739,6 +1842,10 @@ async function initJobWorkflow(jobId) {
   loadHistory();
 
   const isVideo = job.input_type === "video";
+  if (isVideo) {
+    state.videoPlaybackRate = Number(job.playback_rate) || 1.0;
+    updateVideoSpeedButtons(state.videoPlaybackRate);
+  }
   const analysisMode = job.analysis_mode || "realtime_overlay";
 
   if (!isVideo) {
@@ -1810,14 +1917,26 @@ async function startRealtimeVideoSession(job) {
     cancelBtn.hidden = false;
   }
 
+  if (job.playback_rate != null) {
+    state.videoPlaybackRate = Number(job.playback_rate) || 1.0;
+  }
+  updateVideoSpeedButtons(state.videoPlaybackRate);
+  syncVideoSpeedBarVisibility();
+
   updateCutoffBtns(state.cutoffOnPass);
   updateSpeedSelects(state.voicePlaybackRate);
+
+  applyVideoPlaybackRate(video, state.videoPlaybackRate);
 
   const sourceUrl = job.source_url || `/api/jobs/${job.id}/source`;
   if (video.getAttribute("src") !== sourceUrl) {
     video.src = sourceUrl;
+    applyVideoPlaybackRate(video, state.videoPlaybackRate);
     video.load();
-    video.play().catch(() => {});
+    applyVideoPlaybackRate(video, state.videoPlaybackRate);
+    video.play().catch(() => { });
+  } else {
+    applyVideoPlaybackRate(video, state.videoPlaybackRate);
   }
 
   if (!state.overlayRenderer) {
@@ -1852,7 +1971,7 @@ async function startRealtimeVideoSession(job) {
     try {
       const statusData = JSON.parse(e.data);
       handleSSEStatus(job.id, statusData);
-    } catch (_) {}
+    } catch (_) { }
   });
 
   es.addEventListener("overlay", (e) => {
@@ -1861,14 +1980,14 @@ async function startRealtimeVideoSession(job) {
       if (state.overlayRenderer) {
         state.overlayRenderer.addKeyframe(overlayData);
       }
-    } catch (_) {}
+    } catch (_) { }
   });
 
   es.addEventListener("alert", (e) => {
     try {
       const alertData = JSON.parse(e.data);
       handleSSEAlert(alertData);
-    } catch (_) {}
+    } catch (_) { }
   });
 
   es.addEventListener("track_lost", (e) => {
@@ -1884,14 +2003,14 @@ async function startRealtimeVideoSession(job) {
           pruneAndInterruptVideoAudio(curTime);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   });
 
   es.addEventListener("telemetry", (e) => {
     try {
       const telem = JSON.parse(e.data);
       handleSSETelemetry(job.id, telem);
-    } catch (_) {}
+    } catch (_) { }
   });
 
   es.onerror = () => {
@@ -1902,7 +2021,7 @@ async function startRealtimeVideoSession(job) {
         } else if (latest.status === "failed" || latest.status === "cancelled" || latest.status === "stopped") {
           renderFailed(latest);
         }
-      }).catch(() => {});
+      }).catch(() => { });
     }
   };
 
@@ -1919,7 +2038,7 @@ function handleSSEStatus(jobId, data) {
     teardownEventSource();
     api(`/api/jobs/${jobId}`).then((latest) => {
       renderRealtimeDone(latest);
-    }).catch(() => {});
+    }).catch(() => { });
     return;
   }
 
@@ -1927,7 +2046,7 @@ function handleSSEStatus(jobId, data) {
     teardownEventSource();
     api(`/api/jobs/${jobId}`).then((latest) => {
       renderFailed(latest);
-    }).catch(() => {});
+    }).catch(() => { });
     return;
   }
 
@@ -2046,7 +2165,7 @@ function setupPlaybackSync(jobId, video) {
       if (body && body.generation != null && state.overlayRenderer) {
         state.overlayRenderer.setGeneration(body.generation);
       }
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   const onPlay = () => sendSync({ playing: true });
@@ -2059,10 +2178,12 @@ function setupPlaybackSync(jobId, video) {
     resetVideoTrackState();
     sendSync({ seeked: true });
   };
+  const onRateChange = () => sendSync({ playback_rate: video.playbackRate || 1.0 });
 
   video.addEventListener("play", onPlay, { signal });
   video.addEventListener("pause", onPause, { signal });
   video.addEventListener("seeked", onSeeked, { signal });
+  video.addEventListener("ratechange", onRateChange, { signal });
 
   state.playbackSyncTimer = setInterval(() => {
     if (!video.paused && state.job && (state.job.status === "processing" || state.job.status === "queued")) {
@@ -2178,6 +2299,11 @@ async function renderRealtimeDone(job) {
       populateKeyframesFromDetections(detections);
     }
   }
+
+  const targetRate = state.videoPlaybackRate || Number(job.playback_rate) || 1.0;
+  applyVideoPlaybackRate(video, targetRate);
+  updateVideoSpeedButtons(targetRate);
+  syncVideoSpeedBarVisibility();
 
   renderHud(job);
   renderEvents(true);
@@ -2341,6 +2467,7 @@ async function renderLegacyLiveProgress(job) {
   video.hidden = true;
   video.pause();
   image.hidden = true;
+  syncVideoSpeedBarVisibility();
 
   if (state.activeStreamJobId !== job.id) {
     state.activeStreamJobId = job.id;
@@ -2404,6 +2531,7 @@ function renderFailed(job) {
   teardownLiveStream();
   stopLiveAudio();
   if ($("live-bar")) $("live-bar").hidden = true;
+  syncVideoSpeedBarVisibility();
   $("progress-panel").hidden = true;
   $("error-message").textContent = job.error_message || "Không rõ nguyên nhân.";
   $("error-panel").hidden = false;
@@ -2449,10 +2577,14 @@ async function renderResult(job) {
 
   if (isVideo) {
     video.src = job.result_url;
+    const targetRate = state.videoPlaybackRate || Number(job.playback_rate) || 1.0;
+    applyVideoPlaybackRate(video, targetRate);
+    updateVideoSpeedButtons(targetRate);
   } else {
     video.removeAttribute("src");
     image.src = `${job.result_url}?t=${Date.now()}`;
   }
+  syncVideoSpeedBarVisibility();
 
   renderHud(job);
   renderEvents(isVideo);
@@ -2492,7 +2624,7 @@ function seekTo(sec) {
   const video = $("result-video");
   if (!video.src) return;
   video.currentTime = Math.max(0, sec - 0.3);
-  video.play().catch(() => {});
+  video.play().catch(() => { });
 }
 
 function renderEvents(isVideo) {
@@ -2522,7 +2654,7 @@ function renderEvents(isVideo) {
           try {
             state.manualAudio.pause();
             state.manualAudio.removeAttribute("src");
-          } catch (_) {}
+          } catch (_) { }
           state.manualAudio = null;
         }
         const a = new Audio(ev.audio_url);
@@ -2534,7 +2666,7 @@ function renderEvents(isVideo) {
         a.addEventListener("error", () => {
           if (state.manualAudio === a) state.manualAudio = null;
         }, { once: true });
-        a.play().catch(() => {});
+        a.play().catch(() => { });
       },
     });
 
@@ -2754,8 +2886,18 @@ function setupPlayer() {
   video.addEventListener("loadedmetadata", () => {
     drawMarkers();
     renderInsights();
+    applyVideoPlaybackRate(video, state.videoPlaybackRate);
     if (state.overlayRenderer) {
       state.overlayRenderer.updateDimensions();
+    }
+  });
+
+  video.addEventListener("ratechange", () => {
+    const curRate = video.playbackRate || 1.0;
+    if (Math.abs(curRate - state.videoPlaybackRate) > 0.04) {
+      state.videoPlaybackRate = curRate;
+      state.userCustomVideoSpeed = true;
+      updateVideoSpeedButtons(curRate);
     }
   });
 
@@ -2824,6 +2966,16 @@ function setupPlayer() {
   if (liveSpeedSelect) {
     liveSpeedSelect.addEventListener("change", (e) => {
       setVoicePlaybackRate(e.target.value);
+    });
+  }
+
+  const speedGroup = $("video-speed-group");
+  if (speedGroup) {
+    speedGroup.addEventListener("click", (e) => {
+      const btn = e.target.closest(".video-speed-btn");
+      if (!btn) return;
+      const rate = parseFloat(btn.dataset.rate || "1.0");
+      setVideoPlaybackRate(rate, true);
     });
   }
 }

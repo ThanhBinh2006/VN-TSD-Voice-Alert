@@ -526,6 +526,14 @@ def _job_json(job: dict[str, Any]) -> dict[str, Any]:
         )
         if options.get("playback_mode"):
             data["playback_mode"] = options["playback_mode"]
+        if (
+            runtime is not None
+            and isinstance(runtime.get("playback"), Mapping)
+            and "playback_rate" in runtime["playback"]
+        ):
+            data["playback_rate"] = runtime["playback"]["playback_rate"]
+        elif "playback_rate" in options:
+            data["playback_rate"] = options["playback_rate"]
         if options.get("cpu_preset"):
             data["cpu_preset"] = options["cpu_preset"]
         if options.get("backend"):
@@ -613,6 +621,11 @@ def _register_routes(app: Flask) -> None:
             "realtime": {
                 "backends": probe_runtime_backends(),
                 "presets": sorted(CPU_PRESETS["yolo"].keys()),
+                "video_playback_rate": float(
+                    (ctx["cfg"].get("realtime") or {}).get(
+                        "video_playback_rate", 1.0
+                    )
+                ),
                 "tts": {
                     "playback_rate": float(
                         (ctx["cfg"].get("realtime") or {}).get(
@@ -713,6 +726,19 @@ def _register_routes(app: Flask) -> None:
             "buffer_ahead_sec",
             allow_string=True,
         )
+        playback_rate = _number(
+            _nonempty(
+                request.form,
+                "playback_rate",
+                (ctx["cfg"].get("realtime") or {}).get(
+                    "video_playback_rate", 1.0
+                ),
+            ),
+            "playback_rate",
+            minimum=0.0,
+            strictly_positive=True,
+            allow_string=True,
+        )
 
         stem = secure_filename(Path(file.filename).stem) or "upload"
         saved = ctx["uploads_dir"] / f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
@@ -725,6 +751,7 @@ def _register_routes(app: Flask) -> None:
             "frame_stride": stride_val,
             "analysis_mode": analysis_mode,
             "playback_mode": playback_mode,
+            "playback_rate": playback_rate,
             "cpu_preset": cpu_preset,
             "backend": backend,
             "buffer_ahead_sec": buffer_ahead_sec,
@@ -747,6 +774,7 @@ def _register_routes(app: Flask) -> None:
                     buffer_ahead_sec=buffer_ahead_sec,
                     frame_stride=stride_val if raw_stride else None,
                     log_detections=True,
+                    playback_rate=playback_rate,
                 )
             except (ValueError, TypeError) as exc:
                 store.fail_job(job_id, str(exc))
@@ -780,6 +808,7 @@ def _register_routes(app: Flask) -> None:
             data.update({
                 "analysis_mode": analysis_mode,
                 "playback_mode": playback_mode,
+                "playback_rate": playback_rate,
                 "cpu_preset": cpu_preset,
                 "backend": backend,
                 "session": session,
@@ -974,6 +1003,16 @@ def _register_routes(app: Flask) -> None:
             abort(404, description="Không có phiên realtime cho job này")
         except (ValueError, TypeError) as exc:
             return _error(400, str(exc))
+        ctx = _ctx()
+        playback = state.get("playback") if isinstance(state, Mapping) else None
+        if isinstance(playback, Mapping):
+            with ctx["job_lock"]:
+                job_opts = ctx["job_options"].get(job_id)
+                if job_opts is not None:
+                    if "playback_rate" in playback:
+                        job_opts["playback_rate"] = playback["playback_rate"]
+                    if "mode" in playback:
+                        job_opts["playback_mode"] = playback["mode"]
         return jsonify(state)
 
     @app.post("/api/jobs/<int:job_id>/cancel")

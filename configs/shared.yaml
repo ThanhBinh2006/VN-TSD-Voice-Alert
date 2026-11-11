@@ -45,6 +45,7 @@ realtime:
   default_mode: realtime         # realtime | buffered
   buffer_ahead_sec: 2.0
   step_fps_cap: 15.0
+  video_playback_rate: 1.0       # Tốc độ phát video mặc định trên trình duyệt; phải > 0
   tts_timeout_sec: 3.0
   tts_cooldown_sec: 4.0
   tts_max_alert_age_sec: 2.5

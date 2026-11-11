@@ -890,6 +890,7 @@ class RealtimeSessionManager:
         buffer_ahead_sec: float = 2.0,
         frame_stride: int | None = None,
         log_detections: bool = True,
+        playback_rate: float | None = None,
     ) -> dict[str, Any]:
         """Tạo phiên video, kiểm tra nguồn và khởi chạy hai luồng xử lý."""
         stride = _positive_int(
@@ -903,12 +904,23 @@ class RealtimeSessionManager:
             config["realtime"].get("step_fps_cap", 15.0),
             "step_fps_cap",
         )
+        raw_rate = (
+            config["realtime"].get("video_playback_rate", 1.0)
+            if playback_rate is None
+            else playback_rate
+        )
+        if isinstance(raw_rate, bool):
+            raise ValueError("playback_rate không hợp lệ")
+        rate = _finite(raw_rate, "playback_rate", minimum=0.0)
+        if rate <= 0.0:
+            raise ValueError("playback_rate phải > 0.0")
         clock = VideoPlaybackClock()
         clock.update(
             0.0,
             playing=True,
             mode=mode,
             buffer_ahead_sec=buffer_ahead_sec,
+            playback_rate=rate,
         )
         session = _VideoSession(
             key=job_id,

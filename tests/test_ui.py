@@ -47,6 +47,9 @@ def test_index_page_and_static_files(client) -> None:
         "live-stream",
         "live-bar",
         "live-audio-btn",
+        "video-speed-default",
+        "video-speed-bar",
+        "video-speed-group",
     ):
         assert f'id="{el_id}"' in html
     assert client.get("/static/app.css").status_code == 200
@@ -150,3 +153,53 @@ def test_realtime_tts_controls_and_health_config(client) -> None:
         "cutoff_grace_sec": 0.25,
         "cache_enabled": True,
     }
+
+
+def test_video_playback_speed_controls_and_config(client, tmp_path) -> None:
+    """Kiểm tra điều khiển tốc độ phát video trên UI, API health và upload job."""
+    page = client.get("/")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert 'name="playback_rate"' in html
+    assert "Tốc độ video:" in html
+    assert "Giọng nói:" in html
+    for rate in ("0.25", "0.5", "0.75", "1.0", "1.25", "1.5"):
+        assert f'<option value="{rate}"' in html
+        assert f'data-rate="{rate}"' in html
+
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    source = js.get_data(as_text=True)
+    for token in (
+        "applyVideoPlaybackRate",
+        "setVideoPlaybackRate",
+        "updateVideoSpeedButtons",
+        "syncVideoSpeedBarVisibility",
+        "ratechange",
+        "video_playback_rate",
+    ):
+        assert token in source
+
+    health = client.get("/api/health").get_json()
+    assert health["realtime"]["video_playback_rate"] == pytest.approx(1.0)
+
+    p = tmp_path / "speed.mp4"
+    with video_io.VideoWriter(p, 10.0, (96, 64)) as wr:
+        for i in range(20):
+            wr.write(np.full((64, 96, 3), i * 8 % 256, np.uint8))
+
+    resp = client.post(
+        "/api/jobs",
+        data={
+            "file": (io.BytesIO(p.read_bytes()), "speed.mp4"),
+            "model": "yolo",
+            "playback_rate": "0.5",
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 202
+    job_id = resp.get_json()["job_id"]
+    detail = client.get(f"/api/jobs/{job_id}")
+    assert detail.status_code == 200
+    assert detail.get_json()["playback_rate"] == pytest.approx(0.5)
+

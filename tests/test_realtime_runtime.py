@@ -1712,6 +1712,11 @@ def test_camera_upload_backpressure_sse_and_stop(
         ("buffer_ahead_sec", "-1"),
         ("buffer_ahead_sec", "nan"),
         ("buffer_ahead_sec", "inf"),
+        ("playback_rate", "not-a-number"),
+        ("playback_rate", "0"),
+        ("playback_rate", "-0.5"),
+        ("playback_rate", "nan"),
+        ("playback_rate", "inf"),
     ],
 )
 def test_job_validation_precedes_upload_persistence(
@@ -2265,3 +2270,49 @@ def test_realtime_track_lost_sse_preserves_audio_file_and_logs_voice_event(
         if synth_entered.is_set():
             assert synth_finished.wait(WAIT_SEC)
         assert all(capture.released for capture in captures)
+
+
+def test_initial_video_playback_rate_and_live_updates(
+    web_runtime: WebRuntime, video_bytes: bytes
+) -> None:
+    """Initial and live video playback_rate updates propagate cleanly."""
+    manager = web_runtime.extension["realtime"]
+    with pytest.raises(ValueError, match="playback_rate"):
+        manager.start_video_session(
+            9991, Path("unused.mp4"), "yolo", playback_rate=0.0
+        )
+    with pytest.raises(ValueError, match="playback_rate"):
+        manager.start_video_session(
+            9992, Path("unused.mp4"), "yolo", playback_rate=True
+        )
+
+    with web_runtime.app.test_client() as client:
+        health = client.get("/api/health").get_json()
+        assert health["realtime"]["video_playback_rate"] == pytest.approx(1.0)
+
+        created = upload_video(client, video_bytes, playback_rate="0.5")
+        assert created.status_code == 202
+        payload = created.get_json()
+        job_id = int(payload["job_id"])
+        assert payload["playback_rate"] == pytest.approx(0.5)
+        assert payload["session"]["playback"]["playback_rate"] == pytest.approx(0.5)
+
+        detail = client.get(f"/api/jobs/{job_id}").get_json()
+        assert detail["playback_rate"] == pytest.approx(0.5)
+
+        updated = client.post(
+            payload["playback_url"],
+            json={
+                "timestamp_sec": 0.1,
+                "playing": True,
+                "playback_rate": 0.25,
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.get_json()["playback"]["playback_rate"] == pytest.approx(0.25)
+
+        detail_after = client.get(f"/api/jobs/{job_id}").get_json()
+        assert detail_after["playback_rate"] == pytest.approx(0.25)
+
+        cancelled = client.post(payload["cancel_url"])
+        assert cancelled.status_code == 200
