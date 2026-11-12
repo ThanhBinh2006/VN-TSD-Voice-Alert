@@ -1,7 +1,7 @@
 """Phân tích khám phá dữ liệu (EDA) chuyên biệt cho tập dữ liệu thô ban đầu (data/raw).
 
 Xuất chuẩn 8 biểu đồ lưu tại analysis/figures/raw/:
-  01_class_distribution: Phân bố 52 lớp trên tập dữ liệu thô (sắp xếp giảm dần, trục Y symlog)
+  01_class_distribution: Phân bố các lớp trên tập dữ liệu thô (sắp xếp giảm dần, trục Y symlog)
   02_boxes_per_image: Phân bố số lượng box trên mỗi ảnh
   03_box_dimensions: Kích thước box (chiều rộng vs chiều cao và phân loại MS-COCO)
   04_box_center_heatmap: Bản đồ nhiệt mật độ vị trí tâm box
@@ -50,7 +50,7 @@ def analyze_raw_dataset(
     quality_samples: int = 1000,
     blur_threshold: float = 50.0,
     dhash_size: int = 32,
-    dhash_hamming: int = 380,
+    dhash_hamming: int = 100,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Quy trình phân tích chuyên biệt và xuất đủ 8 biểu đồ cho dataset thô."""
@@ -81,7 +81,7 @@ def analyze_raw_dataset(
     }
 
     # 01. Class distribution
-    print("\n[EDA Raw] 01 Class distribution (toàn bộ 52 lớp sắp xếp giảm dần)...")
+    print(f"\n[EDA Raw] 01 Class distribution (toàn bộ {len(classes)} lớp sắp xếp giảm dần)...")
     summary_meta["classes"] = plot_class_distribution(all_boxes, classes, target_dir / "01_class_distribution.png", tag="raw")
 
     # 02. Boxes per Image
@@ -139,7 +139,7 @@ def main(argv=None) -> None:
     p.add_argument("--num-samples", type=int, default=9, help="Số ảnh mẫu vẽ demo nhãn (default: 9)")
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
-    p.add_argument("--dhash-hamming", type=int, default=380, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 380)")
+    p.add_argument("--dhash-hamming", type=int, default=100, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 100)")
     args = p.parse_args(argv)
 
     data_root = Path(args.data_root).resolve()

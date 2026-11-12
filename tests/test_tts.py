@@ -127,9 +127,9 @@ def test_build_speech_text_all_real_classes_include_position(
     position: str,
     position_text: str,
 ) -> None:
-    """Kiểm tra toàn bộ 52 lớp thật ở cả ba vị trí với cấu hình YAML thật."""
-    assert len(real_classes) == 52
-    assert set(real_classes) == set(range(52))
+    """Kiểm tra toàn bộ 90 lớp thật ở cả ba vị trí với cấu hình YAML thật."""
+    assert len(real_classes) == 90
+    assert set(real_classes) == set(range(90))
 
     for class_id, info in real_classes.items():
         text = build_speech_text(
@@ -274,7 +274,7 @@ def test_pipeline_passes_cfg_and_speaks_position_for_real_classes(
             }
         )
 
-    label = "Giới hạn tốc độ (50km/h)"
+    label = "Giới hạn tốc độ 50km/h"
     class_id = next(
         class_id
         for class_id, info in real_classes.items()

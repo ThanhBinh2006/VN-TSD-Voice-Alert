@@ -1,4 +1,4 @@
-"""Augmentation nhãn thiểu số trong tập train (cắt an toàn, zoom, blur rất nhẹ, không xoay)."""
+"""Augmentation nhãn thiểu số trong tập train: cắt an toàn, zoom, chỉnh sáng/tương phản; không làm mờ, không xoay."""
 from __future__ import annotations
 
 import random
@@ -124,7 +124,7 @@ def transform_and_letterbox_crop(
     min_box_px: int = 8,
     pad_value: int = 114,
 ) -> tuple[np.ndarray, tuple[int, float, float, float, float]] | tuple[None, None]:
-    """Cắt, zoom, blur rất nhẹ (15%, sigma 0.25–0.50) và letterbox, không xoay."""
+    """Cắt an toàn, zoom, chỉnh sáng/tương phản và letterbox; không làm mờ, không xoay."""
     H, W = img.shape[:2]
     cid, t_cx, t_cy, t_bw, t_bh = target_box
     bx1 = (t_cx - t_bw / 2.0) * W
@@ -171,11 +171,7 @@ def transform_and_letterbox_crop(
     if (nbx2 - nbx1) < min_box_px or (nby2 - nby1) < min_box_px:
         return None, None
 
-    # Làm mờ rất nhẹ (xác suất 15%, kernel 3x3, sigma 0.25–0.50) & chỉnh sáng nhẹ
-    if rng.random() < 0.15:
-        sigma = rng.uniform(0.25, 0.50)
-        transformed_crop = cv2.GaussianBlur(transformed_crop, (3, 3), sigmaX=sigma, sigmaY=sigma)
-
+    # Chỉnh sáng và tương phản nhẹ
     alpha = rng.uniform(0.88, 1.15)
     beta = rng.uniform(-18, 18)
     transformed_crop = cv2.convertScaleAbs(transformed_crop, alpha=alpha, beta=beta)
@@ -221,6 +217,7 @@ def augment_minority_classes(
     pad_value: int = 114,
     max_augmented_per_class: int | None = None,
     seed: int = 42,
+    hamming_thresh: int = 100,
 ) -> dict[str, Any]:
     """Cân bằng dữ liệu cho các lớp trong tập Train, không xoay.
 
@@ -291,14 +288,43 @@ def augment_minority_classes(
 
     popcount = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
-    img_cache: dict[str, np.ndarray] = {}
+    img_cache: dict[str, np.ndarray | None] = {}
+    fallback_img_paths: dict[str, Path] | None = None
 
     def get_img(st: str) -> np.ndarray | None:
+        """Đọc ảnh, ưu tiên .jpg rồi .jpeg, .png, .bmp, .webp, không phân biệt hoa/thường đuôi."""
+        nonlocal fallback_img_paths
+
         if st in img_cache:
             return img_cache[st]
+
         p = train_img_dir / f"{st}.jpg"
-        if not p.exists():
-            return None
+        if not p.is_file():
+            if fallback_img_paths is None:
+                suffix_priority = {
+                    ".jpg": 0,
+                    ".jpeg": 1,
+                    ".png": 2,
+                    ".bmp": 3,
+                    ".webp": 4,
+                }
+                fallback_img_paths = {}
+                candidates = sorted(
+                    (
+                        path
+                        for path in train_img_dir.iterdir()
+                        if path.suffix.lower() in suffix_priority and path.is_file()
+                    ),
+                    key=lambda path: (suffix_priority[path.suffix.lower()], path.name),
+                )
+                for candidate in candidates:
+                    fallback_img_paths.setdefault(candidate.stem, candidate)
+
+            fallback = fallback_img_paths.get(st)
+            if fallback is None:
+                return None
+            p = fallback
+
         im = cv2.imread(str(p))
         if len(img_cache) < 250:
             img_cache[st] = im
@@ -354,7 +380,7 @@ def augment_minority_classes(
                     cand_packed = np.packbits(diff.flatten()[None, :], axis=1)
                     xor = np.bitwise_xor(cand_packed, val_test_packed)
                     dist = popcount[xor].sum(axis=1)
-                    if dist.min() <= 374:
+                    if dist.min() <= hamming_thresh:
                         continue
 
                 passed = True

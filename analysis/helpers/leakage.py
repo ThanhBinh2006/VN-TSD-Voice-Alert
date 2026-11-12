@@ -1,148 +1,204 @@
-"""Module chuyên trách phân tích và vẽ biểu đồ rò rỉ dữ liệu (Data Leakage) bằng dHash.
+"""Phân tích và vẽ biểu đồ rò rỉ dữ liệu bằng dHash.
 
-Đặc điểm quan trọng:
-  - Tự động loại bỏ hoàn toàn viền xám (114) sinh ra khi letterbox-resize
-    để không nhận nhầm vùng xám là tương đồng nội dung.
-  - Sử dụng dHash thuần túy (size=32 -> 1024-bit) để đánh giá tương đồng bối cảnh cục bộ.
-  - Loại bỏ các câu chữ kết luận dài dòng trong biểu đồ theo yêu cầu người dùng.
+Loại bỏ viền xám letterbox khi tính dHash và kiểm tra toàn bộ ảnh theo
+từng khối để giới hạn bộ nhớ dùng cho phép tính khoảng cách Hamming.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
 
 from analysis.helpers.image_utils import calculate_dhash
+
+
+def _iter_hamming_chunks(
+    packed_a: np.ndarray,
+    packed_b: np.ndarray,
+    chunk_size: int = 256,
+) -> Iterator[tuple[int, np.ndarray]]:
+    """Sinh khoảng cách Hamming của từng khối hàng so với toàn bộ tập B.
+
+    Chia cả tập B thành các khối để tensor XOR và bảng tra popcount
+    không tăng theo tổng số ảnh. Ma trận khoảng cách trả về có tối đa
+    ``chunk_size`` hàng; tổng khoảng cách dùng uint64 để tránh tràn số.
+    """
+    popcount = np.array([k.bit_count() for k in range(256)], dtype=np.uint8)
+
+    for start_a in range(0, len(packed_a), chunk_size):
+        block_a = packed_a[start_a:start_a + chunk_size]
+        distances = np.empty((len(block_a), len(packed_b)), dtype=np.uint64)
+
+        for start_b in range(0, len(packed_b), chunk_size):
+            block_b = packed_b[start_b:start_b + chunk_size]
+            xor = np.bitwise_xor(block_a[:, None, :], block_b[None, :, :])
+            distances[:, start_b:start_b + len(block_b)] = popcount[xor].sum(
+                axis=2,
+                dtype=np.uint64,
+            )
+            del xor
+
+        yield start_a, distances
+        del distances
 
 
 def check_data_leakage(
     split_stems: dict[str, list[str]],
     stem_to_path: dict[str, Path],
     hash_size: int = 32,
-    hamming_thresh: int = 380,
+    hamming_thresh: int = 100,
 ) -> dict[str, Any]:
-    """Khảo sát rò rỉ dữ liệu sử dụng dHash thuần túy giữa tất cả các cặp split (train, val, test).
+    """Kiểm tra toàn bộ ảnh giữa các split bằng dHash theo từng khối.
 
-    Ngưỡng dHash mặc định 380 bit để đánh giá rò rỉ dữ liệu giữa tất cả các cặp split.
+    Ảnh không tồn tại hoặc không tính được dHash được bỏ qua khi so sánh.
+    Ngưỡng mặc định là 100 bit; không giới hạn số lượng stem được xét.
     """
     splits = [s for s in ("train", "val", "test") if s in split_stems and split_stems[s]]
     n_splits = len(splits)
     if n_splits < 2:
         return {"status": "SKIPPED_NOT_ENOUGH_SPLITS"}
 
-    # 1. Tính mã băm dHash (bỏ viền xám 114) cho từng split
+    chunk_size = 256
     dhash_cache: dict[str, np.ndarray | None] = {}
 
     def _get_hash(stem: str) -> np.ndarray | None:
+        """Lấy dHash từ bộ nhớ đệm hoặc tính từ ảnh đã loại viền xám."""
         if stem in dhash_cache:
             return dhash_cache[stem]
-        p = stem_to_path.get(stem)
-        if not p or not p.exists():
+        path = stem_to_path.get(stem)
+        if path is None or not path.exists():
             dhash_cache[stem] = None
             return None
-        hd = calculate_dhash(p, hash_size=hash_size, strip_padding=True)
-        dhash_cache[stem] = hd
-        return hd
+        hashed = calculate_dhash(path, hash_size=hash_size, strip_padding=True)
+        dhash_cache[stem] = hashed
+        return hashed
 
     split_valid_stems: dict[str, list[str]] = {}
     split_packed_d: dict[str, np.ndarray] = {}
-    max_check_per_split = 2500
 
-    for s in splits:
-        stems_to_eval = split_stems[s]
-        if len(stems_to_eval) > max_check_per_split:
-            real_stems = [st for st in stems_to_eval if not ("_aug" in st)]
-            aug_stems = [st for st in stems_to_eval if "_aug" in st]
-            remain = max(0, max_check_per_split - len(real_stems))
-            if remain > 0 and aug_stems:
-                step = max(1, len(aug_stems) // remain)
-                sampled_aug = aug_stems[::step][:remain]
-                stems_to_eval = real_stems + sampled_aug
-            else:
-                stems_to_eval = real_stems[:max_check_per_split]
-
+    for split in splits:
         valid: list[str] = []
-        d_list: list[np.ndarray] = []
-        for st in stems_to_eval:
-            hd = _get_hash(st)
-            if hd is not None:
-                valid.append(st)
-                d_list.append(hd)
+        hashes: list[np.ndarray] = []
+        for stem in split_stems[split]:
+            hashed = _get_hash(stem)
+            if hashed is not None:
+                valid.append(stem)
+                hashes.append(hashed)
 
-        split_valid_stems[s] = valid
+        split_valid_stems[split] = valid
         if valid:
-            split_packed_d[s] = np.packbits(np.array(d_list, dtype=np.uint8), axis=1)
+            split_packed_d[split] = np.packbits(
+                np.array(hashes, dtype=np.uint8),
+                axis=1,
+            )
         else:
-            split_packed_d[s] = np.zeros((0, (hash_size * hash_size) // 8), dtype=np.uint8)
+            split_packed_d[split] = np.zeros(
+                (0, (hash_size * hash_size + 7) // 8),
+                dtype=np.uint8,
+            )
 
-    # 2. Xây dựng ma trận khoảng cách Hamming dHash
-    popcount = np.array([bin(k).count("1") for k in range(256)], dtype=np.uint8)
+    dhash_cache.clear()
+    del hashes
+
     leak_matrix = np.zeros((n_splits, n_splits), dtype=int)
     leak_pair_matrix = np.zeros((n_splits, n_splits), dtype=int)
     all_leak_pairs: list[dict[str, Any]] = []
     leak_summary_by_split: dict[str, Any] = {}
 
     for i, s1 in enumerate(splits):
-        for j, s2 in enumerate(splits):
-            if i == j:
-                leak_matrix[i, j] = len(split_stems[s1])
-                leak_pair_matrix[i, j] = len(split_stems[s1])
+        leak_matrix[i, i] = len(split_stems[s1])
+        leak_pair_matrix[i, i] = len(split_stems[s1])
+
+        for j in range(i + 1, n_splits):
+            s2 = splits[j]
+            p1_d = split_packed_d[s1]
+            p2_d = split_packed_d[s2]
+            if len(p1_d) == 0 or len(p2_d) == 0:
                 continue
 
-            p1_d = split_packed_d.get(s1)
-            p2_d = split_packed_d.get(s2)
-            if p1_d is None or p2_d is None or len(p1_d) == 0 or len(p2_d) == 0:
-                continue
+            unique_i = np.zeros(len(p1_d), dtype=bool)
+            unique_j = np.zeros(len(p2_d), dtype=bool)
+            n_pairs = 0
 
-            xor_d = np.bitwise_xor(p1_d[:, None, :], p2_d[None, :, :])
-            dist_d = popcount[xor_d].sum(axis=2)
+            for start, dist_d in _iter_hamming_chunks(p1_d, p2_d, chunk_size):
+                leaked_mask = dist_d <= hamming_thresh
+                unique_i[start:start + len(dist_d)] = leaked_mask.any(axis=1)
+                unique_j |= leaked_mask.any(axis=0)
 
-            leaked_mask = (dist_d <= hamming_thresh)
-            leaked_i, leaked_j = np.where(leaked_mask)
-            n_pairs = len(leaked_i)
-            n_unique_s1 = len(np.unique(leaked_i))
-            n_unique_s2 = len(np.unique(leaked_j))
+                # Duyệt từng hàng để tránh giữ mảng chỉ số cho cả khối
+                # khi phần lớn các cặp đều nằm dưới ngưỡng.
+                for local_i, row_mask in enumerate(leaked_mask):
+                    matched_j = np.flatnonzero(row_mask)
+                    n_pairs += int(matched_j.size)
+                    if matched_j.size == 0:
+                        continue
+
+                    st1 = split_valid_stems[s1][start + local_i]
+                    image_a = (
+                        stem_to_path[st1].name
+                        if st1 in stem_to_path
+                        else f"{st1}.jpg"
+                    )
+                    for idx2 in matched_j:
+                        st2 = split_valid_stems[s2][idx2]
+                        all_leak_pairs.append({
+                            "split_a": s1,
+                            "image_a": image_a,
+                            "split_b": s2,
+                            "image_b": (
+                                stem_to_path[st2].name
+                                if st2 in stem_to_path
+                                else f"{st2}.jpg"
+                            ),
+                            "hamming_dhash": int(dist_d[local_i, idx2]),
+                        })
+
+                del dist_d, leaked_mask
+
+            n_unique_s1 = int(np.count_nonzero(unique_i))
+            n_unique_s2 = int(np.count_nonzero(unique_j))
 
             leak_matrix[i, j] = n_unique_s1
+            leak_matrix[j, i] = n_unique_s2
             leak_pair_matrix[i, j] = n_pairs
+            leak_pair_matrix[j, i] = n_pairs
 
-            if i < j:
-                split_pair_key = f"{s1}_vs_{s2}"
-                leak_summary_by_split[split_pair_key] = {
-                    "leak_pairs_count": int(n_pairs),
-                    f"{s1}_images_leaked": int(n_unique_s1),
-                    f"{s2}_images_leaked": int(n_unique_s2),
-                    f"{s1}_leak_pct": round(float(n_unique_s1 / max(len(split_stems[s1]), 1) * 100), 2),
-                    f"{s2}_leak_pct": round(float(n_unique_s2 / max(len(split_stems[s2]), 1) * 100), 2),
-                }
+            split_pair_key = f"{s1}_vs_{s2}"
+            leak_summary_by_split[split_pair_key] = {
+                "leak_pairs_count": int(n_pairs),
+                f"{s1}_images_leaked": n_unique_s1,
+                f"{s2}_images_leaked": n_unique_s2,
+                f"{s1}_leak_pct": round(
+                    float(n_unique_s1 / max(len(split_stems[s1]), 1) * 100),
+                    2,
+                ),
+                f"{s2}_leak_pct": round(
+                    float(n_unique_s2 / max(len(split_stems[s2]), 1) * 100),
+                    2,
+                ),
+            }
 
-                for k in range(n_pairs):
-                    idx1 = leaked_i[k]
-                    idx2 = leaked_j[k]
-                    st1 = split_valid_stems[s1][idx1]
-                    st2 = split_valid_stems[s2][idx2]
-                    all_leak_pairs.append({
-                        "split_a": s1,
-                        "image_a": stem_to_path[st1].name if st1 in stem_to_path else f"{st1}.jpg",
-                        "split_b": s2,
-                        "image_b": stem_to_path[st2].name if st2 in stem_to_path else f"{st2}.jpg",
-                        "hamming_dhash": int(dist_d[idx1, idx2]),
-                    })
-
-    # 3. Đánh giá riêng chi tiết Test vs Train
     dhash_test_to_train: dict[str, Any] = {}
     min_dists_d: np.ndarray | None = None
     if "train" in split_packed_d and "test" in split_packed_d:
         p_tr_d = split_packed_d["train"]
         p_te_d = split_packed_d["test"]
         if len(p_tr_d) > 0 and len(p_te_d) > 0:
-            xor_te_tr_d = np.bitwise_xor(p_te_d[:, None, :], p_tr_d[None, :, :])
-            dist_te_tr_d = popcount[xor_te_tr_d].sum(axis=2)
-            min_dists_d = dist_te_tr_d.min(axis=1)
+            min_dists_d = np.empty(len(p_te_d), dtype=np.uint64)
+            for start, dist_te_tr_d in _iter_hamming_chunks(
+                p_te_d,
+                p_tr_d,
+                chunk_size,
+            ):
+                min_dists_d[start:start + len(dist_te_tr_d)] = dist_te_tr_d.min(
+                    axis=1,
+                )
+                del dist_te_tr_d
 
-            is_near_dup = (dist_te_tr_d <= hamming_thresh)
-            n_near_thresh = int(np.count_nonzero(is_near_dup.any(axis=1)))
+            n_near_thresh = int(np.count_nonzero(min_dists_d <= hamming_thresh))
             pct_near_thresh = float(n_near_thresh / len(min_dists_d) * 100)
             dhash_test_to_train = {
                 "min_hamming_dhash": int(min_dists_d.min()),
@@ -176,44 +232,59 @@ def find_leaked_test_stems(
     test_stems: list[str],
     stem_to_path: dict[str, Path],
     hash_size: int = 32,
-    hamming_thresh: int = 362,
+    hamming_thresh: int = 100,
 ) -> tuple[list[str], list[str]]:
-    """Phát hiện và phân tách các stem trong test split thành clean và leaked dựa trên dHash."""
-    tr_d = []
-    for s in train_stems:
-        if s in stem_to_path:
-            hd = calculate_dhash(stem_to_path[s], hash_size=hash_size, strip_padding=True)
-            if hd is not None:
-                tr_d.append(hd)
+    """Phân tách stem Test thành clean và leaked bằng dHash theo từng khối."""
+    tr_d: list[np.ndarray] = []
+    for stem in train_stems:
+        if stem in stem_to_path:
+            hashed = calculate_dhash(
+                stem_to_path[stem],
+                hash_size=hash_size,
+                strip_padding=True,
+            )
+            if hashed is not None:
+                tr_d.append(hashed)
 
-    te_d, valid_te_stems = [], []
-    for s in test_stems:
-        if s in stem_to_path:
-            hd = calculate_dhash(stem_to_path[s], hash_size=hash_size, strip_padding=True)
-            if hd is not None:
-                te_d.append(hd)
-                valid_te_stems.append(s)
+    te_d: list[np.ndarray] = []
+    valid_te_stems: list[str] = []
+    for stem in test_stems:
+        if stem in stem_to_path:
+            hashed = calculate_dhash(
+                stem_to_path[stem],
+                hash_size=hash_size,
+                strip_padding=True,
+            )
+            if hashed is not None:
+                te_d.append(hashed)
+                valid_te_stems.append(stem)
 
     if not tr_d or not te_d:
         return list(test_stems), []
 
     tr_packed_d = np.packbits(np.array(tr_d, dtype=np.uint8), axis=1)
     te_packed_d = np.packbits(np.array(te_d, dtype=np.uint8), axis=1)
-    popcount = np.array([bin(k).count("1") for k in range(256)], dtype=np.uint8)
+    del tr_d, te_d
 
-    xor_d = np.bitwise_xor(te_packed_d[:, None, :], tr_packed_d[None, :, :])
-    dist_d = popcount[xor_d].sum(axis=2)
-
-    is_leaked_matrix = (dist_d <= hamming_thresh)
-    is_leaked_test = is_leaked_matrix.any(axis=1)
-
+    chunk_size = 256
     clean_stems: list[str] = []
     leaked_stems: list[str] = []
-    for stem, leaked in zip(valid_te_stems, is_leaked_test):
-        if leaked:
-            leaked_stems.append(stem)
-        else:
-            clean_stems.append(stem)
+
+    for start, dist_d in _iter_hamming_chunks(
+        te_packed_d,
+        tr_packed_d,
+        chunk_size,
+    ):
+        is_leaked_test = (dist_d <= hamming_thresh).any(axis=1)
+        for stem, leaked in zip(
+            valid_te_stems[start:start + len(dist_d)],
+            is_leaked_test,
+        ):
+            if leaked:
+                leaked_stems.append(stem)
+            else:
+                clean_stems.append(stem)
+        del dist_d
 
     return clean_stems, leaked_stems
 
@@ -230,7 +301,7 @@ def plot_data_leakage(
     leak_matrix = np.array(leak_data.get("leak_matrix", np.zeros((n_splits, n_splits))))
     split_stems = leak_data.get("split_stems", {})
     min_dists = leak_data.get("min_dists")
-    hamming_thresh = leak_data.get("dhash_threshold", 380)
+    hamming_thresh = leak_data.get("dhash_threshold", 100)
     dhash_test_to_train = leak_data.get("dhash_test_to_train", {})
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 7.5))

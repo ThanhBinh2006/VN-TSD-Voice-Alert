@@ -1,4 +1,4 @@
-"""Phân chia dataset theo cụm dHash, bảo toàn 52 lớp cho tập train."""
+"""Phân chia dataset theo cụm dHash, bảo toàn toàn bộ lớp cho tập train."""
 from __future__ import annotations
 
 import random
@@ -66,7 +66,7 @@ def split_clusters_for_classes(
     blur_threshold: float = 50.0,
     dark_threshold: float = 85.0,
 ) -> dict[str, list[str]]:
-    """Phân bổ cụm vào Train/Val/Test (Train đủ 52 lớp, cô lập cụm 100%)."""
+    """Phân bổ cụm vào Train/Val/Test (Train đủ toàn bộ lớp, cô lập cụm 100%)."""
     total_images = len(img_paths)
     all_stems = [p.stem for p in img_paths]
     stem_to_path = {p.stem: p for p in img_paths}
@@ -130,7 +130,7 @@ def split_clusters_for_classes(
         if len(c_stems) >= 300:
             mandatory_train.add(cname)
 
-    print(f"[split] Cụm bắt buộc vào Train (bảo toàn 52 lớp): {len(mandatory_train)} cụm ({sum(len(clusters[c]) for c in mandatory_train):,} ảnh).")
+    print(f"[split] Cụm bắt buộc vào Train (bảo toàn {required_classes} lớp): {len(mandatory_train)} cụm ({sum(len(clusters[c]) for c in mandatory_train):,} ảnh).")
 
     best_score = float("inf")
     best_splits: dict[str, list[str]] | None = None
@@ -207,13 +207,13 @@ def split_clusters_for_classes(
             best_info = (split_sizes, split_classes, split_dark, split_blur)
 
     if best_splits is None:
-        raise RuntimeError("Không tìm thấy cấu hình split thỏa mãn điều kiện {required_classes} lớp trong train.")
+        raise RuntimeError(f"Không tìm thấy cấu hình split thỏa mãn điều kiện {required_classes} lớp trong train.")
 
     sizes, classes, s_dark, s_blur = best_info
     print(f"[split] Hoàn thành phân bổ split theo cụm (Cô lập cụm 100%):")
-    print(f"[split]   Train: {sizes['train']:,} ảnh ({sizes['train']/total_images*100:.1f}%) | {len(classes['train'])}/52 lớp | {s_dark['train']} ảnh tối | {s_blur['train']} ảnh mờ")
-    print(f"[split]   Val  : {sizes['val']:,} ảnh ({sizes['val']/total_images*100:.1f}%) | {len(classes['val'])}/52 lớp | {s_dark['val']} ảnh tối | {s_blur['val']} ảnh mờ")
-    print(f"[split]   Test : {sizes['test']:,} ảnh ({sizes['test']/total_images*100:.1f}%) | {len(classes['test'])}/52 lớp | {s_dark['test']} ảnh tối | {s_blur['test']} ảnh mờ")
+    print(f"[split]   Train: {sizes['train']:,} ảnh ({sizes['train']/total_images*100:.1f}%) | {len(classes['train'])}/{required_classes} lớp | {s_dark['train']} ảnh tối | {s_blur['train']} ảnh mờ")
+    print(f"[split]   Val  : {sizes['val']:,} ảnh ({sizes['val']/total_images*100:.1f}%) | {len(classes['val'])}/{required_classes} lớp | {s_dark['val']} ảnh tối | {s_blur['val']} ảnh mờ")
+    print(f"[split]   Test : {sizes['test']:,} ảnh ({sizes['test']/total_images*100:.1f}%) | {len(classes['test'])}/{required_classes} lớp | {s_dark['test']} ảnh tối | {s_blur['test']} ảnh mờ")
 
     return best_splits
 
@@ -223,7 +223,7 @@ def split_by_dhash_clusters(
     lbl_dir: Path,
     ratio: tuple[float, float, float] = (0.70, 0.15, 0.15),
     hash_size: int = 32,
-    hamming_thresh: int = 380,
+    hamming_thresh: int = 100,
     min_box_px: int = 8,
     image_size: tuple[int, int] = (640, 640),
     seed: int = 42,

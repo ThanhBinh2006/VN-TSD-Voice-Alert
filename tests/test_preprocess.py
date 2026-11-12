@@ -21,6 +21,7 @@ from ts_alert.data.preprocess_offline import (
     letterbox_sample,
     list_raw_samples,
     promote_rare_classes_to_train,
+    run_preprocess,
     split_samples,
     write_data_yaml,
 )
@@ -277,11 +278,11 @@ def test_compute_adaptive_class_targets_tiers(
     assert compute_adaptive_class_targets({}) == {}
 
 
-def test_augment_minority_classes_uncapped_and_light_blur(
+def test_augment_minority_classes_uncapped_and_no_blur(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sinh đủ 22 ảnh và kiểm tra nhánh blur 15% với sigma tối đa 0.50."""
+    """Sinh đủ 22 ảnh, bảo toàn nhãn và không gọi GaussianBlur."""
     img_dir = tmp_path / "train" / "images"
     lbl_dir = tmp_path / "train" / "labels"
     img_dir.mkdir(parents=True)
@@ -305,6 +306,16 @@ def test_augment_minority_classes_uncapped_and_light_blur(
             )
             original_labels[stem] = label_text
 
+    original_blur = cv2.GaussianBlur
+    blur_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture_blur(*args: Any, **kwargs: Any) -> np.ndarray:
+        """Ghi nhận mọi lời gọi GaussianBlur trong toàn bộ augmentation."""
+        blur_calls.append((args, kwargs))
+        return original_blur(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "GaussianBlur", capture_blur)
+
     result = augment_minority_classes(
         train_img_dir=img_dir,
         train_lbl_dir=lbl_dir,
@@ -312,6 +323,7 @@ def test_augment_minority_classes_uncapped_and_light_blur(
         seed=42,
     )
 
+    assert blur_calls == []
     assert result["n_augmented_images"] == 22
     assert result["n_augmented_boxes"] == 22
     assert result["minority_classes_augmented"] == [0]
@@ -353,25 +365,19 @@ def test_augment_minority_classes_uncapped_and_light_blur(
         ) == label_text
 
     class ControlledRandom(random.Random):
-        """Cố định hình học và ánh sáng, chỉ điều khiển xác suất cùng sigma blur."""
+        """Cố định hình học và ánh sáng, phát hiện nhánh xác suất ngoài ý muốn."""
 
-        def __init__(self, probability: float, sigma: float) -> None:
+        def __init__(self) -> None:
             super().__init__(42)
-            self.probability = probability
-            self.sigma = sigma
             self.random_calls = 0
-            self.sigma_requests = 0
 
         def random(self) -> float:
-            """Trả xác suất xác định để kiểm tra ngưỡng 0.15."""
+            """Ghi nhận lời gọi xác suất vốn không còn được sử dụng."""
             self.random_calls += 1
-            return self.probability
+            return 0.0
 
         def uniform(self, a: float, b: float) -> float:
-            """Giữ zoom, ánh sáng và vùng cắt cố định."""
-            if (a, b) == (0.25, 0.50):
-                self.sigma_requests += 1
-                return self.sigma
+            """Giữ vùng cắt, zoom và ánh sáng cố định; từ chối khoảng sigma."""
             if (a, b) == (-18, 18):
                 return 0.0
             if (a, b) in (
@@ -382,67 +388,283 @@ def test_augment_minority_classes_uncapped_and_light_blur(
                 return 1.0
             raise AssertionError(f"Khoảng uniform ngoài dự kiến: {(a, b)}")
 
-    original_blur = cv2.GaussianBlur
-    blur_calls: list[tuple[tuple[int, int], float, float]] = []
-
-    def capture_blur(
-        src: np.ndarray,
-        ksize: tuple[int, int],
-        sigmaX: float,
-        sigmaY: float,
-    ) -> np.ndarray:
-        """Ghi nhận kernel và sigma, vẫn thực hiện GaussianBlur thật."""
-        blur_calls.append((ksize, sigmaX, sigmaY))
-        return original_blur(src, ksize, sigmaX=sigmaX, sigmaY=sigmaY)
-
-    monkeypatch.setattr(cv2, "GaussianBlur", capture_blur)
-
     baseline_sharpness = float(
         cv2.Laplacian(checkerboard, cv2.CV_64F).var()
     )
     assert baseline_sharpness > 1_000
 
-    cases = [
-        (0.149999, 0.25, True),
-        (0.149999, 0.50, True),
-        (0.15, 0.50, False),
-        (0.90, 0.50, False),
-    ]
-    for probability, sigma, should_blur in cases:
-        rng = ControlledRandom(probability, sigma)
-        previous_calls = len(blur_calls)
+    rng = ControlledRandom()
+    canvas, final_box = transform_and_letterbox_crop(
+        img=sharp_image,
+        target_box=(0, 0.5, 0.5, 0.5, 0.5),
+        safe_bounds=(0.0, 0.0, 160.0, 160.0),
+        rng=rng,
+        target_size=(160, 160),
+    )
 
-        canvas, final_box = transform_and_letterbox_crop(
-            img=sharp_image,
-            target_box=(0, 0.5, 0.5, 0.5, 0.5),
-            safe_bounds=(0.0, 0.0, 160.0, 160.0),
-            rng=rng,
-            target_size=(160, 160),
-        )
+    assert canvas is not None
+    assert final_box is not None
+    assert final_box == pytest.approx((0, 0.5, 0.5, 0.5, 0.5))
+    assert rng.random_calls == 0
+    assert blur_calls == []
+    assert np.array_equal(canvas, sharp_image)
 
-        assert canvas is not None
-        assert final_box is not None
-        assert final_box == pytest.approx((0, 0.5, 0.5, 0.5, 0.5))
-        assert rng.random_calls == 1
-        assert rng.sigma_requests == int(should_blur)
-        assert len(blur_calls) - previous_calls == int(should_blur)
+    gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    assert sharpness > 1_000
+    assert sharpness == pytest.approx(baseline_sharpness)
 
-        if should_blur:
-            assert blur_calls[-1] == ((3, 3), sigma, sigma)
-            expected = original_blur(
-                sharp_image,
-                (3, 3),
-                sigmaX=sigma,
-                sigmaY=sigma,
-            )
-            np.testing.assert_array_equal(canvas, expected)
+
+def test_list_raw_samples_existing_splits_and_stem_collisions(
+    tmp_path: Path,
+) -> None:
+    """Giữ split và đường dẫn gốc, đổi stem trùng và hỗ trợ layout phẳng."""
+    raw_dir = tmp_path / "presplit_raw"
+    image = np.full((24, 32, 3), 200, dtype=np.uint8)
+    label_text = "0 0.5 0.5 0.5 0.5\n"
+
+    # val_dup là tên duy nhất đã được giữ chỗ trước khi đổi tên val/dup.
+    split_stems = {
+        "train": ("train_unique", "val_dup"),
+        "val": ("val_unique", "dup"),
+        "test": ("test_unique", "dup"),
+    }
+    expected_paths: dict[Path, tuple[str, Path]] = {}
+
+    for split, stems in split_stems.items():
+        img_dir = raw_dir / "images" / split
+        lbl_dir = raw_dir / "labels" / split
+        img_dir.mkdir(parents=True)
+        lbl_dir.mkdir(parents=True)
+
+        for stem in stems:
+            img_path = img_dir / f"{stem}.jpg"
+            lbl_path = lbl_dir / f"{stem}.txt"
+            assert cv2.imwrite(str(img_path), image)
+            lbl_path.write_text(label_text, encoding="utf-8")
+            expected_paths[img_path] = (split, lbl_path)
+
+    samples = list_raw_samples(raw_dir)
+
+    assert len(samples) == len(expected_paths)
+    assert {sample["image"] for sample in samples} == set(expected_paths)
+    assert len({sample["stem"] for sample in samples}) == len(samples)
+
+    samples_by_image = {sample["image"]: sample for sample in samples}
+    for img_path, (split, lbl_path) in expected_paths.items():
+        sample = samples_by_image[img_path]
+        assert sample["split"] == split
+        assert sample["label"] == lbl_path
+        assert img_path.is_file()
+        assert lbl_path.read_text(encoding="utf-8") == label_text
+
+        if img_path.stem != "dup":
+            assert sample["stem"] == img_path.stem
         else:
-            np.testing.assert_array_equal(canvas, sharp_image)
+            assert sample["stem"].startswith(f"{split}_dup")
+            assert sample["stem"] != "dup"
 
-        gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
-        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        assert sharpness > 1_000
-        assert sharpness >= baseline_sharpness * 0.25
+    # Việc đổi stem đầu ra không đổi tên ảnh hoặc nhãn nguồn.
+    assert (raw_dir / "images" / "val" / "dup.jpg").is_file()
+    assert (raw_dir / "images" / "test" / "dup.jpg").is_file()
+
+    flat_dir = tmp_path / "flat_raw"
+    flat_img_dir = flat_dir / "images"
+    flat_lbl_dir = flat_dir / "labels"
+    flat_img_dir.mkdir(parents=True)
+    flat_lbl_dir.mkdir(parents=True)
+
+    flat_img_path = flat_img_dir / "flat_unique.jpg"
+    flat_lbl_path = flat_lbl_dir / "flat_unique.txt"
+    assert cv2.imwrite(str(flat_img_path), image)
+    flat_lbl_path.write_text(label_text, encoding="utf-8")
+
+    assert list_raw_samples(flat_dir) == [
+        {
+            "image": flat_img_path,
+            "label": flat_lbl_path,
+            "stem": "flat_unique",
+            "split": None,
+        }
+    ]
+
+
+def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Giữ split có sẵn, augment không blur và dồn ảnh rò rỉ sau letterbox."""
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    classes_csv = tmp_path / "classes.csv"
+    classes_csv.write_text(
+        "id,name,tts_text\n"
+        "0,Biển báo phổ biến,Cảnh báo biển báo phổ biến\n"
+        "1,Biển báo hiếm,Cảnh báo biển báo hiếm\n",
+        encoding="utf-8",
+    )
+
+    for split in ("train", "val", "test"):
+        (raw_dir / "images" / split).mkdir(parents=True)
+        (raw_dir / "labels" / split).mkdir(parents=True)
+
+    def make_pattern(seed: int) -> np.ndarray:
+        """Tạo ảnh 320x240 có ô tương phản ngẫu nhiên tái lập được."""
+        rng = np.random.default_rng(seed)
+        tiles = rng.integers(0, 256, size=(32, 40), dtype=np.uint8)
+        gray = cv2.resize(
+            tiles,
+            (320, 240),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        return np.repeat(gray[:, :, None], 3, axis=2)
+
+    def write_sample(
+        split: str,
+        stem: str,
+        image: np.ndarray,
+        labels: str,
+    ) -> None:
+        """Ghi một cặp ảnh và nhãn vào layout raw đã chia split."""
+        img_path = raw_dir / "images" / split / f"{stem}.jpg"
+        lbl_path = raw_dir / "labels" / split / f"{stem}.txt"
+        assert image.shape == (240, 320, 3)
+        assert cv2.imwrite(
+            str(img_path),
+            image,
+            [cv2.IMWRITE_JPEG_QUALITY, 95],
+        )
+        lbl_path.write_text(labels, encoding="utf-8")
+
+    common_image = make_pattern(101)
+    common_labels = (
+        "0 0.25 0.25 0.20 0.20\n"
+        "0 0.75 0.25 0.20 0.20\n"
+        "0 0.25 0.75 0.20 0.20\n"
+        "0 0.75 0.75 0.20 0.20\n"
+    )
+    write_sample("train", "train_common", common_image, common_labels)
+    write_sample(
+        "train",
+        "train_rare",
+        make_pattern(202),
+        "1 0.5 0.5 0.3 0.3\n",
+    )
+    write_sample(
+        "val",
+        "val_unique",
+        make_pattern(303),
+        "0 0.5 0.5 0.3 0.3\n",
+    )
+    write_sample(
+        "test",
+        "test_unique",
+        make_pattern(404),
+        "1 0.5 0.5 0.3 0.3\n",
+    )
+    write_sample(
+        "test",
+        "leaked_from_train",
+        common_image,
+        common_labels,
+    )
+
+    cfg: dict[str, Any] = {
+        "seed": 42,
+        "paths": {
+            "raw_dir": str(raw_dir),
+            "processed_dir": str(processed_dir),
+            "classes_csv": str(classes_csv),
+        },
+        "data": {
+            "image_size": 640,
+            "pad_value": 114,
+            "split": {"train": 0.7, "val": 0.2, "test": 0.1},
+            "blur_threshold": 50.0,
+            "dark_threshold": 85.0,
+        },
+        "preprocess": {
+            "min_box_px": 8,
+        },
+        "split": {
+            "hash_size": 32,
+            "hamming_threshold": 100,
+        },
+    }
+
+    original_blur = cv2.GaussianBlur
+    blur_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture_blur(*args: Any, **kwargs: Any) -> np.ndarray:
+        """Ghi nhận GaussianBlur nếu pipeline vô tình làm mờ ảnh."""
+        blur_calls.append((args, kwargs))
+        return original_blur(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "GaussianBlur", capture_blur)
+
+    meta = run_preprocess(cfg)
+
+    assert blur_calls == []
+    assert meta["split_mode"] == "existing"
+    assert meta["aug_blur"] is False
+    assert meta["num_classes"] == 2
+    assert meta["n_augmented_images"] > 0
+    assert meta["leakage_rate"] == 0.0
+    assert meta["remaining_leaks"] == {
+        "train_vs_val": 0,
+        "train_vs_test": 0,
+        "val_vs_test": 0,
+    }
+
+    # Hai lớp đều đã có trong train: ảnh trùng được chuyển bởi bước dHash.
+    assert meta["rare_classes_promoted"]["moved_total"] == 0
+    assert (
+        processed_dir / "images" / "train" / "leaked_from_train.jpg"
+    ).exists()
+    assert not (
+        processed_dir / "images" / "test" / "leaked_from_train.jpg"
+    ).exists()
+    assert (
+        processed_dir / "labels" / "train" / "leaked_from_train.txt"
+    ).exists()
+    assert not (
+        processed_dir / "labels" / "test" / "leaked_from_train.txt"
+    ).exists()
+
+    # Các ảnh độc lập tiếp tục ở đúng split ban đầu.
+    assert (
+        processed_dir / "images" / "train" / "train_common.jpg"
+    ).exists()
+    assert (
+        processed_dir / "images" / "train" / "train_rare.jpg"
+    ).exists()
+    assert (
+        processed_dir / "images" / "val" / "val_unique.jpg"
+    ).exists()
+    assert (
+        processed_dir / "images" / "test" / "test_unique.jpg"
+    ).exists()
+
+    output_images: list[Path] = []
+    for split in ("train", "val", "test"):
+        split_images = sorted(
+            (processed_dir / "images" / split).glob("*.jpg")
+        )
+        assert len(split_images) == meta["counts"][split]
+        output_images.extend(split_images)
+
+        for img_path in split_images:
+            image = cv2.imread(str(img_path))
+            assert image is not None, str(img_path)
+            assert image.shape == (640, 640, 3), str(img_path)
+            assert (
+                processed_dir / "labels" / split / f"{img_path.stem}.txt"
+            ).is_file()
+
+    assert len(output_images) == 5 + meta["n_augmented_images"]
+    assert len({path.stem for path in output_images}) == len(output_images)
+    assert (processed_dir / "data.yaml").is_file()
+    assert (processed_dir / "meta.json").is_file()
 
 
 def test_plot_class_distribution_full_names_horizontal(
