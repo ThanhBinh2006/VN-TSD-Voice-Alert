@@ -215,14 +215,15 @@ def augment_minority_classes(
     image_size: tuple[int, int] = (640, 640),
     min_box_px: int = 8,
     pad_value: int = 114,
-    max_augmented_per_class: int | None = None,
+    max_augmented_per_class: int | None = 10,
     seed: int = 42,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
 ) -> dict[str, Any]:
     """Cân bằng dữ liệu cho các lớp trong tập Train, không xoay.
 
-    max_augmented_per_class=None không giới hạn số ảnh thêm mỗi lớp;
-    số nguyên dương đặt trần số ảnh thêm mỗi lớp.
+    Chỉ tăng cường lớp có ít hơn 100 box gốc, với mọi chính sách mục tiêu.
+    Mặc định thêm tối đa 10 ảnh mỗi lớp; None bỏ giới hạn này nhưng vẫn
+    tuân theo mục tiêu số box. Trần <= 0 không sinh ảnh tăng cường.
     """
     rng = random.Random(seed)
     if not train_img_dir.is_dir() or not train_lbl_dir.is_dir():
@@ -272,7 +273,9 @@ def augment_minority_classes(
             else min(class_targets[c] - class_counts[c], max_augmented_per_class)
         )
         for c in class_counts
-        if class_targets[c] > class_counts[c]
+        if class_counts[c] < 100
+        and class_targets[c] > class_counts[c]
+        and (max_augmented_per_class is None or max_augmented_per_class > 0)
     }
     if not class_needed:
         print("[augment] Tất cả các lớp trong train đã đạt mục tiêu, không cần augment.")

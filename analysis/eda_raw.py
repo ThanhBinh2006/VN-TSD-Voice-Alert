@@ -50,7 +50,7 @@ def analyze_raw_dataset(
     quality_samples: int = 1000,
     blur_threshold: float = 50.0,
     dhash_size: int = 32,
-    dhash_hamming: int = 100,
+    dhash_hamming: int = 50,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Quy trình phân tích chuyên biệt và xuất đủ 8 biểu đồ cho dataset thô."""
@@ -139,7 +139,7 @@ def main(argv=None) -> None:
     p.add_argument("--num-samples", type=int, default=9, help="Số ảnh mẫu vẽ demo nhãn (default: 9)")
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
-    p.add_argument("--dhash-hamming", type=int, default=100, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 100)")
+    p.add_argument("--dhash-hamming", type=int, default=50, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 50)")
     args = p.parse_args(argv)
 
     data_root = Path(args.data_root).resolve()

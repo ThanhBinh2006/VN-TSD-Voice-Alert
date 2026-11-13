@@ -2,7 +2,7 @@
 
 Sử dụng:
   - dHash 1024-bit (size=32)
-  - Ngưỡng Hamming distance <= 100
+  - Ngưỡng Hamming distance <= 50
   - Tự động loại bỏ viền padding xám 114 khi tính hash
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ class _DisjointSet:
 def cluster_images_dhash(
     img_paths: list[Path],
     hash_size: int = 32,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
 ) -> dict[str, Any]:
     """Gom cụm ảnh bằng mã băm dHash thuần túy (1024-bit).
 
@@ -134,7 +134,7 @@ def plot_dhash_clusters(
         return
 
     hash_size = cluster_res.get("hash_size", 32)
-    hamming_thresh = cluster_res.get("hamming_threshold", 100)
+    hamming_thresh = cluster_res.get("hamming_threshold", 50)
     N = cluster_res.get("total_images", 0)
 
     sub_h = f"dHash {hash_size*hash_size}b (≤{hamming_thresh})"

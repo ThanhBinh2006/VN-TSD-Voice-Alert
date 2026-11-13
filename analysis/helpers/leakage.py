@@ -49,12 +49,12 @@ def check_data_leakage(
     split_stems: dict[str, list[str]],
     stem_to_path: dict[str, Path],
     hash_size: int = 32,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
 ) -> dict[str, Any]:
     """Kiểm tra toàn bộ ảnh giữa các split bằng dHash theo từng khối.
 
     Ảnh không tồn tại hoặc không tính được dHash được bỏ qua khi so sánh.
-    Ngưỡng mặc định là 100 bit; không giới hạn số lượng stem được xét.
+    Ngưỡng mặc định là 50 bit; không giới hạn số lượng stem được xét.
     """
     splits = [s for s in ("train", "val", "test") if s in split_stems and split_stems[s]]
     n_splits = len(splits)
@@ -232,7 +232,7 @@ def find_leaked_test_stems(
     test_stems: list[str],
     stem_to_path: dict[str, Path],
     hash_size: int = 32,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
 ) -> tuple[list[str], list[str]]:
     """Phân tách stem Test thành clean và leaked bằng dHash theo từng khối."""
     tr_d: list[np.ndarray] = []
@@ -301,7 +301,7 @@ def plot_data_leakage(
     leak_matrix = np.array(leak_data.get("leak_matrix", np.zeros((n_splits, n_splits))))
     split_stems = leak_data.get("split_stems", {})
     min_dists = leak_data.get("min_dists")
-    hamming_thresh = leak_data.get("dhash_threshold", 100)
+    hamming_thresh = leak_data.get("dhash_threshold", 50)
     dhash_test_to_train = leak_data.get("dhash_test_to_train", {})
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 7.5))

@@ -278,11 +278,20 @@ def test_compute_adaptive_class_targets_tiers(
     assert compute_adaptive_class_targets({}) == {}
 
 
-def test_augment_minority_classes_uncapped_and_no_blur(
+@pytest.mark.parametrize(
+    ("cap_kwargs", "expected_images"),
+    [
+        ({}, 10),
+        ({"max_augmented_per_class": None}, 22),
+    ],
+)
+def test_augment_minority_classes_capped_uncapped_and_no_blur(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cap_kwargs: dict[str, Any],
+    expected_images: int,
 ) -> None:
-    """Sinh đủ 22 ảnh, bảo toàn nhãn và không gọi GaussianBlur."""
+    """Mặc định sinh 10 ảnh, None sinh 22 ảnh; bảo toàn nhãn, không blur."""
     img_dir = tmp_path / "train" / "images"
     lbl_dir = tmp_path / "train" / "labels"
     img_dir.mkdir(parents=True)
@@ -321,21 +330,22 @@ def test_augment_minority_classes_uncapped_and_no_blur(
         train_lbl_dir=lbl_dir,
         image_size=(160, 160),
         seed=42,
+        **cap_kwargs,
     )
 
     assert blur_calls == []
-    assert result["n_augmented_images"] == 22
-    assert result["n_augmented_boxes"] == 22
+    assert result["n_augmented_images"] == expected_images
+    assert result["n_augmented_boxes"] == expected_images
     assert result["minority_classes_augmented"] == [0]
 
     augmented_labels = sorted(lbl_dir.glob("*_aug*.txt"))
     augmented_images = sorted(img_dir.glob("*_aug*.jpg"))
-    assert len(augmented_labels) == 22
-    assert len(augmented_images) == 22
+    assert len(augmented_labels) == expected_images
+    assert len(augmented_images) == expected_images
     assert {path.stem for path in augmented_labels} == {
         path.stem for path in augmented_images
     }
-    assert len(list(img_dir.glob("*.jpg"))) == 152
+    assert len(list(img_dir.glob("*.jpg"))) == 130 + expected_images
 
     class_counts: dict[int, int] = {}
     for label_path in lbl_dir.glob("*.txt"):
@@ -343,7 +353,7 @@ def test_augment_minority_classes_uncapped_and_no_blur(
         for cid, _, _, _, _ in boxes:
             class_counts[cid] = class_counts.get(cid, 0) + 1
 
-    assert class_counts == {0: 52, 1: 100}
+    assert class_counts == {0: 30 + expected_images, 1: 100}
 
     for label_path in augmented_labels:
         boxes = _read_raw_labels(label_path)
@@ -489,6 +499,55 @@ def test_list_raw_samples_existing_splits_and_stem_collisions(
     ]
 
 
+@pytest.mark.parametrize("target_min_boxes", ["max", 200])
+@pytest.mark.parametrize("cap", [10, None, 0, -1])
+def test_augmentation_never_augments_classes_with_100_boxes(
+    tmp_path: Path,
+    target_min_boxes: str | int,
+    cap: int | None,
+) -> None:
+    """Không tăng cường lớp >=100 box, kể cả mục tiêu max hoặc cố định."""
+    img_dir = tmp_path / "images"
+    lbl_dir = tmp_path / "labels"
+    img_dir.mkdir()
+    lbl_dir.mkdir()
+
+    image = np.full((160, 160, 3), 200, dtype=np.uint8)
+    for cid, count in ((0, 1), (1, 100), (2, 101)):
+        stem = f"class_{cid}"
+        assert cv2.imwrite(str(img_dir / f"{stem}.jpg"), image)
+        (lbl_dir / f"{stem}.txt").write_text(
+            f"{cid} 0.5 0.5 0.5 0.5\n" * count,
+            encoding="utf-8",
+        )
+
+    result = augment_minority_classes(
+        train_img_dir=img_dir,
+        train_lbl_dir=lbl_dir,
+        target_min_boxes=target_min_boxes,
+        max_augmented_per_class=cap,
+        image_size=(160, 160),
+    )
+
+    expected_images = (
+        (100 if target_min_boxes == "max" else 199)
+        if cap is None
+        else max(0, cap)
+    )
+    assert result["n_augmented_images"] == expected_images
+    assert result["n_augmented_boxes"] == expected_images
+
+    augmented_labels = list(lbl_dir.glob("*_aug*.txt"))
+    assert len(augmented_labels) == expected_images
+    for label_path in augmented_labels:
+        boxes = _read_raw_labels(label_path)
+        assert len(boxes) == 1
+        assert boxes[0][0] == 0
+
+    for cid, count in ((1, 100), (2, 101)):
+        assert len(_read_raw_labels(lbl_dir / f"class_{cid}.txt")) == count
+
+
 def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -548,7 +607,7 @@ def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
         "train",
         "train_rare",
         make_pattern(202),
-        "1 0.5 0.5 0.3 0.3\n",
+        "1 0.5 0.5 0.3 0.3\n" * 20,
     )
     write_sample(
         "val",
@@ -588,7 +647,7 @@ def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
         },
         "split": {
             "hash_size": 32,
-            "hamming_threshold": 100,
+            "hamming_threshold": 50,
         },
     }
 
@@ -609,6 +668,15 @@ def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
     assert meta["aug_blur"] is False
     assert meta["num_classes"] == 2
     assert meta["n_augmented_images"] > 0
+    assert meta["max_augmented_per_class"] == 10
+    augmented_class_counts: dict[int, int] = {}
+    for label_path in (processed_dir / "labels" / "train").glob("*_aug*.txt"):
+        boxes = _read_raw_labels(label_path)
+        assert len(boxes) == 1
+        cid = boxes[0][0]
+        augmented_class_counts[cid] = augmented_class_counts.get(cid, 0) + 1
+    assert augmented_class_counts == {0: 6, 1: 10}
+    assert sum(augmented_class_counts.values()) == meta["n_augmented_images"]
     assert meta["leakage_rate"] == 0.0
     assert meta["remaining_leaks"] == {
         "train_vs_val": 0,

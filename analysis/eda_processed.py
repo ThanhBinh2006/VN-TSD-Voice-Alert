@@ -7,7 +7,7 @@ Xuất chuẩn 9 biểu đồ lưu tại analysis/figures/processed/:
   04_box_center_heatmap: Mật độ vị trí tâm box trên canvas 640x640
   05_images_per_split: Số lượng ảnh và box theo từng tập Train, Val, Test
   06_tiny_box_candidates: Xác nhận 0% box nhỏ < min_box_px
-  07_data_leakage: Ma trận trùng lặp và khoảng cách Hamming dHash (<=100)
+  07_data_leakage: Ma trận trùng lặp và khoảng cách Hamming dHash (<=50)
   08_brightness_sharpness: Đánh giá quang học độ sáng & độ nét phân tách từng tập (layout 3x3)
   09_sample_labels: Demo 9 ảnh mẫu sau tiền xử lý kèm bounding box
 File dữ liệu tổng hợp: analysis/figures/processed/eda_summary.json
@@ -52,7 +52,7 @@ def analyze_processed_dataset(
     quality_samples: int = 1000,
     blur_threshold: float = 50.0,
     dhash_size: int = 32,
-    dhash_hamming: int = 100,
+    dhash_hamming: int = 50,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Quy trình phân tích chuyên sâu độc lập cho dataset sau tiền xử lý (9 biểu đồ)."""
@@ -176,7 +176,7 @@ def main(argv=None) -> None:
     p.add_argument("--num-samples", type=int, default=9, help="Số ảnh mẫu vẽ demo nhãn (default: 9)")
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
-    p.add_argument("--dhash-hamming", type=int, default=100, help="Ngưỡng khoảng cách Hamming dHash (default: 100)")
+    p.add_argument("--dhash-hamming", type=int, default=50, help="Ngưỡng khoảng cách Hamming dHash (default: 50)")
     args = p.parse_args(argv)
 
     data_root = Path(args.data_root).resolve()

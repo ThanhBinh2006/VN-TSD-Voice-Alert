@@ -102,7 +102,7 @@ def main(argv=None) -> None:
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
     p.add_argument("--blur-threshold", type=float, default=50.0, help="Ngưỡng Laplacian variance xác định ảnh mờ (default: 50.0)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
-    p.add_argument("--dhash-hamming", type=int, default=100, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 100)")
+    p.add_argument("--dhash-hamming", type=int, default=50, help="Ngưỡng khoảng cách Hamming dHash gom cụm (default: 50)")
     args = p.parse_args(argv)
 
     data_root_str = args.data_root or os.environ.get("DATA_ROOT") or ""

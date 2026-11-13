@@ -227,7 +227,7 @@ def split_samples(
     ratios: dict,
     seed: int = 42,
     hash_size: int = 32,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
     min_box_px: int = 8,
     image_size: int = 640,
     blur_threshold: float = 50.0,
@@ -451,7 +451,7 @@ def _filter_tiny_boxes(
 
 def _consolidate_post_resize_leakage(
     out_root: Path,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
     hash_size: int = 32,
 ) -> dict[str, Any]:
     """Dồn thành phần tương đồng dHash theo ưu tiên train, val, test.
@@ -633,6 +633,11 @@ def run_preprocess(
     img_size = int(data.get("image_size", 640))
     pad_val = int(data.get("pad_value", 114))
     preprocess_cfg = cfg.get("preprocess", {})
+    max_augmented_per_class = preprocess_cfg.get(
+        "max_augmented_per_class", 10
+    )
+    if max_augmented_per_class is not None:
+        max_augmented_per_class = int(max_augmented_per_class)
     min_box_px = int(preprocess_cfg.get("min_box_px", 8))
     blur_threshold = float(
         data.get("blur_threshold", preprocess_cfg.get("blur_threshold", 50.0))
@@ -642,7 +647,7 @@ def run_preprocess(
     )
     hash_size = int(cfg.get("split", {}).get("hash_size", 32))
     hamming_thresh = int(
-        cfg.get("split", {}).get("hamming_threshold", 100)
+        cfg.get("split", {}).get("hamming_threshold", 50)
     )
     augment_minority = True
     split_names = ("train", "val", "test")
@@ -703,9 +708,15 @@ def run_preprocess(
             splits, clean_boxes, min_train_boxes=10
         )
 
+    augmentation_cap = (
+        "không giới hạn"
+        if max_augmented_per_class is None
+        else f"{max_augmented_per_class} ảnh/lớp"
+    )
     print(
         "[run_preprocess] B2: Tăng cường lớp thiểu số trong Train "
-        "(không làm mờ)..."
+        f"(không làm mờ, trần: {augmentation_cap}, "
+        "chỉ lớp có dưới 100 box)..."
     )
     aug_items: list[
         tuple[
@@ -758,11 +769,18 @@ def run_preprocess(
                     class_candidates[box[0]].append((stem, box, bounds))
 
         class_targets = compute_adaptive_class_targets(train_class_counts)
-        class_needed = {
-            cid: class_targets[cid] - train_class_counts[cid]
-            for cid in train_class_counts
-            if class_targets[cid] > train_class_counts[cid]
-        }
+        class_needed: dict[int, int] = {}
+        for cid, count in train_class_counts.items():
+            if count >= 100 or class_targets[cid] <= count:
+                continue
+
+            needed = class_targets[cid] - count
+            if max_augmented_per_class is not None:
+                needed = min(needed, max_augmented_per_class)
+            if needed <= 0:
+                continue
+
+            class_needed[cid] = needed
 
         val_test_hashes: list[np.ndarray] = []
         for sname in ("val", "test"):
@@ -958,6 +976,7 @@ def run_preprocess(
         "elapsed_seconds": round(time.time() - t0, 2),
         "rare_classes_promoted": promo_info,
         "n_augmented_images": len(aug_items),
+        "max_augmented_per_class": max_augmented_per_class,
         "split_mode": split_mode,
         "aug_blur": False,
     }

@@ -223,7 +223,7 @@ def split_by_dhash_clusters(
     lbl_dir: Path,
     ratio: tuple[float, float, float] = (0.70, 0.15, 0.15),
     hash_size: int = 32,
-    hamming_thresh: int = 100,
+    hamming_thresh: int = 50,
     min_box_px: int = 8,
     image_size: tuple[int, int] = (640, 640),
     seed: int = 42,
