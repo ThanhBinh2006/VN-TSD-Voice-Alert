@@ -1,13 +1,13 @@
 """Phân tích khám phá dữ liệu (EDA) chuyên biệt cho tập dữ liệu sau tiền xử lý (data/processed).
 
 Xuất chuẩn 9 biểu đồ lưu tại analysis/figures/processed/:
-  01_class_distribution: Phân bố 52 lớp trên 3 subplot (Train Real vs Aug, Val, Test) với trục Y symlog
+  01_class_distribution: Phân bố toàn bộ các lớp trên 3 subplot (Train Real vs Aug, Val, Test) với trục Y symlog
   02_boxes_per_image: Phân bố số lượng box trên mỗi ảnh sau letterbox
   03_box_dimensions: Kích thước box (chiều rộng vs chiều cao và MS-COCO scale trên canvas 640x640)
   04_box_center_heatmap: Mật độ vị trí tâm box trên canvas 640x640
   05_images_per_split: Số lượng ảnh và box theo từng tập Train, Val, Test
   06_tiny_box_candidates: Xác nhận 0% box nhỏ < min_box_px
-  07_data_leakage: Ma trận trùng lặp và khoảng cách Hamming dHash (<=362)
+  07_data_leakage: Ma trận trùng lặp và khoảng cách Hamming dHash (<=50)
   08_brightness_sharpness: Đánh giá quang học độ sáng & độ nét phân tách từng tập (layout 3x3)
   09_sample_labels: Demo 9 ảnh mẫu sau tiền xử lý kèm bounding box
 File dữ liệu tổng hợp: analysis/figures/processed/eda_summary.json
@@ -52,7 +52,7 @@ def analyze_processed_dataset(
     quality_samples: int = 1000,
     blur_threshold: float = 50.0,
     dhash_size: int = 32,
-    dhash_hamming: int = 380,
+    dhash_hamming: int = 50,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Quy trình phân tích chuyên sâu độc lập cho dataset sau tiền xử lý (9 biểu đồ)."""
@@ -80,7 +80,16 @@ def analyze_processed_dataset(
     for sname in split_names:
         s_lbl_dir = data_root / "labels" / sname
         s_img_dir = data_root / "images" / sname
-        s_imgs = list(s_img_dir.glob("*.jpg")) if s_img_dir.is_dir() else []
+        s_imgs = (
+            [
+                p
+                for p in s_img_dir.iterdir()
+                if p.is_file()
+                and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+            ]
+            if s_img_dir.is_dir()
+            else []
+        )
         sboxes = read_yolo_labels(s_lbl_dir, image_size_px=image_size)
         for b in sboxes:
             b["split"] = sname
@@ -167,7 +176,7 @@ def main(argv=None) -> None:
     p.add_argument("--num-samples", type=int, default=9, help="Số ảnh mẫu vẽ demo nhãn (default: 9)")
     p.add_argument("--quality-samples", type=int, default=1000, help="Số ảnh lấy mẫu đo độ sáng/độ nét (default: 1000)")
     p.add_argument("--dhash-size", type=int, default=32, help="Kích thước cạnh dHash (default: 32 -> 1024 bits)")
-    p.add_argument("--dhash-hamming", type=int, default=380, help="Ngưỡng khoảng cách Hamming dHash (default: 380)")
+    p.add_argument("--dhash-hamming", type=int, default=50, help="Ngưỡng khoảng cách Hamming dHash (default: 50)")
     args = p.parse_args(argv)
 
     data_root = Path(args.data_root).resolve()

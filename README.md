@@ -6,7 +6,7 @@
 [![Faster R-CNN](https://img.shields.io/badge/torchvision-Faster%20R--CNN%20R50-orange)](configs/pipelines/faster_rcnn.yaml)
 [![W&B](https://img.shields.io/badge/Tracking-Weights%20%26%20Biases-FFBE00?logo=weightsandbiases&logoColor=black)](configs/shared.yaml)
 
-Hệ thống mô phỏng hỗ trợ lái xe nâng cao (**ADAS**) cho phép phát hiện **52 loại biển báo giao thông Việt Nam** từ ảnh/video và **cảnh báo bằng giọng nói tiếng Việt** đúng thời điểm biển xuất hiện theo vị trí làn (`trái` / `trước mặt` / `phải`).
+Hệ thống mô phỏng hỗ trợ lái xe nâng cao (**ADAS**) cho phép phát hiện **90 loại biển báo giao thông Việt Nam** từ ảnh/video và **cảnh báo bằng giọng nói tiếng Việt** đúng thời điểm biển xuất hiện theo vị trí làn (`trái` / `trước mặt` / `phải`).
 
 Dự án huấn luyện, tinh chỉnh siêu tham số và đối sánh công bằng hai họ mô hình phát hiện đối tượng trên **cùng một bộ dữ liệu chuẩn hóa không rò rỉ**:
 - **YOLO26m** (One-stage detector, tối ưu tốc độ thời gian thực) — [`ultralytics`](ts_alert/pipelines/yolo/)
@@ -70,7 +70,7 @@ TSD-Voice-Alert/
 │   ├── static/                      # CSS, JS, fonts
 │   └── templates/index.html         # Giao diện người dùng
 ├── configs/
-│   ├── classes.csv                  # 52 lớp biển báo Việt Nam (id, name, tts_text)
+│   ├── classes.csv                  # 90 lớp biển báo Việt Nam (id, name, tts_text)
 │   ├── shared.yaml                  # Cấu hình BẤT BIẾN dùng chung cho cả hai mô hình
 │   ├── pipelines/
 │   │   ├── yolo.yaml                # Kế thừa shared.yaml; cấu hình YOLO26m + Sweep
@@ -127,22 +127,19 @@ TSD-Voice-Alert/
 
 ## 3. Dữ liệu & Tiền xử lý
 
-- **Nguồn dữ liệu**: [Vietnamese Traffic Signs – Kaggle](https://www.kaggle.com/datasets/maitam/vietnamese-traffic-signs) (**52 lớp** biển báo theo chuẩn QCVN 41:2019/BGTVT trong [`configs/classes.csv`](configs/classes.csv)).
+- **Nguồn dữ liệu**: Bộ dữ liệu biển báo giao thông Việt Nam gồm **90 lớp** theo chuẩn QCVN 41:2019/BGTVT trong [`configs/classes.csv`](configs/classes.csv).
 - **Tiền xử lý Offline 6 bước** ([`ts_alert/data/preprocess_offline.py`](ts_alert/data/preprocess_offline.py), chi tiết tại [`docs/DATA_ANALYSIS_AND_PREPROCESSING.md`](docs/DATA_ANALYSIS_AND_PREPROCESSING.md)):
   1. Lọc bỏ bounding box quá nhỏ (`< 8px` trên canvas `640×640`).
-  2. Gom cụm bối cảnh ảnh chuỗi video bằng **dHash 1024-bit** (`Hamming <= 380` -> `314` cụm từ `3.216` ảnh gốc).
-  3. Chia cụm `Train / Val / Test` bảo đảm **52/52 lớp** có mặt trong Train và cân bằng ảnh mờ/tối.
-  4. Tăng cường có kiểm soát cho các lớp thiểu số trong Train (từ chối ảnh nếu dHash trùng cụm Val/Test).
-  5. Chuẩn hóa **letterbox `640×640`** (pad màu xám `114`) và cập nhật tọa độ nhãn YOLO.
+  2. Gom cụm bối cảnh ảnh chuỗi video bằng **dHash 1024-bit** (`Hamming <= 50`).
+  3. Chia cụm `Train / Val / Test` bảo đảm đầy đủ các lớp có mặt trong Train và cân bằng ảnh mờ/tối.
+  4. Tăng cường có kiểm soát cho các lớp thiểu số trong Train (tối đa `10` ảnh sinh mới/lớp, từ chối ảnh nếu dHash trùng cụm Val/Test).
+  5. Chuẩn hóa **letterbox `640×640`** (pad màu đen `pad_value: 0`) và cập nhật tọa độ nhãn YOLO.
   6. Đối soát rò rỉ sau resize & dồn tập triệt để -> **0.00% Data Leakage**.
 
 | Tập dữ liệu | Số ảnh | Số bounding box | Lớp xuất hiện | Ghi chú |
 |---|---:|---:|:---:|---|
-| **Gốc (`data/raw`)** | 3.216 | 8.334 | 52 / 52 | Chưa lọc tiny box / chưa augment |
-| **Train (`data/processed`)** | 2.660 | 5.743 | **52 / 52** | Đã lọc tiny box + augment lớp thiểu số |
-| **Val (`data/processed`)** | 438 | 1.204 | 40 / 52 | 0.00% rò rỉ với Train & Test |
-| **Test (`data/processed`)** | 371 | 829 | 38 / 52 | 0.00% rò rỉ với Train & Val |
-| **Tổng sau xử lý** | **3.469** | **7.776** | **52 / 52** | Dùng chung cho cả YOLO26m & Faster R-CNN |
+| **Gốc (`data/raw`)** | 10.231 | 20.114 | 90 / 90 | Đầy đủ 90 lớp biển báo |
+| **Processed Cache (`data/processed`)** | Đã tiền xử lý | Đã lọc tiny box | Bảo toàn trong Train | 0.00% rò rỉ bối cảnh video (dHash <= 50) |
 
 - **Tiền xử lý Online** ([`ts_alert/data/preprocess_online.py`](ts_alert/data/preprocess_online.py)): Mặc định **TẮT** (`online_preprocess.enabled: false`) để so sánh công bằng hai mô hình trên tập dữ liệu offline chuẩn. Khi bật (`--online` hoặc `ONLINE = True`):
   - **Cả 2 pipeline**: hỗ trợ biến đổi màu HSV (`hsv_h`, `hsv_s`, `hsv_v`), lật ngang (`hflip`, mặc định `false` do biển báo nhạy hướng) và **che khuất một phần góc/cạnh box** (`occlusion_p`, `occlusion_ratio`).

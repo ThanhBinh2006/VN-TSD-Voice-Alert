@@ -82,11 +82,11 @@ def test_yolo_contract():
 
         # Kiểm tra nhãn khớp configs/classes.csv
         assert detections[0]["class_id"] == 0
-        assert detections[0]["label"] == "Đường người đi bộ cắt ngang"
+        assert detections[0]["label"] == "Cấm đi ngược chiều"
         assert abs(detections[0]["confidence"] - 0.88) < 1e-4
 
         assert detections[1]["class_id"] == 10
-        assert detections[1]["label"] == "Cấm dừng và đỗ xe"
+        assert detections[1]["label"] == "Cảnh báo chướng ngại vật phía trước"
         assert abs(detections[1]["confidence"] - 0.92) < 1e-4
 
 

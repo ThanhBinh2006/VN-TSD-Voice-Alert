@@ -31,6 +31,7 @@ def plot_sample_labeled_images(
     """
     img_dir = data_root / "images"
     search_dir = img_dir if img_dir.is_dir() else data_root
+    supported_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
     stem_to_boxes: dict[str, list[dict[str, Any]]] = {}
     for b in boxes:
@@ -55,7 +56,11 @@ def plot_sample_labeled_images(
 
     for idx, stem in enumerate(chosen_stems):
         ax = axes[idx]
-        img_candidates = list(search_dir.rglob(f"{stem}.jpg")) + list(search_dir.rglob(f"{stem}.png"))
+        img_candidates = [
+            path
+            for path in search_dir.rglob(f"{stem}.*")
+            if path.is_file() and path.suffix.lower() in supported_extensions
+        ]
         if not img_candidates:
             ax.axis("off")
             continue
