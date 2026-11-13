@@ -1,14 +1,8 @@
-"""Tiền xử lý offline dataset cho Faster R-CNN và YOLO (TSD-Voice-Alert).
+"""Tiền xử lý offline dataset với presplit train/val/test cố định.
 
-Quy trình:
-  - Lọc bounding box nhỏ trên canvas đích, mặc định 640x640.
-  - Giữ phân chia train/val/test có sẵn; nếu không có, chia theo cụm dHash.
-  - Bảo đảm các lớp có nhãn hợp lệ xuất hiện trong train.
-  - Tăng cường lớp thiểu số trong train bằng cắt, zoom, chỉnh sáng/tương phản,
-    không làm mờ; loại ứng viên tương đồng với val/test.
-  - Letterbox về 640x640 theo cấu hình, giữ tỉ lệ và padding mặc định 114.
-  - Dồn các thành phần tương đồng dHash về cùng split để đạt 0.00% rò rỉ
-    giữa các ảnh tính được dHash.
+Lọc box nhỏ, tăng cường lớp thiểu số trong train không làm mờ,
+letterbox và thống kê rò rỉ dHash mà không chuyển ảnh giữa split.
+Mọi split phải có ít nhất một ảnh nguồn.
 """
 from __future__ import annotations
 
@@ -19,7 +13,6 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-import csv
 import json
 import random
 import shutil
@@ -32,9 +25,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from analysis.helpers.clustering import cluster_images_dhash
 from analysis.helpers.image_utils import calculate_dhash
-from ts_alert.config.resolve import get_num_classes, resolve_path
+from ts_alert.config.resolve import resolve_path
 from ts_alert.data.helpers.augmentation import (
     _read_raw_labels,
     _write_labels,
@@ -42,7 +34,6 @@ from ts_alert.data.helpers.augmentation import (
     get_safe_crop_bounds,
     transform_and_letterbox_crop,
 )
-from ts_alert.data.helpers.split import split_clusters_for_classes
 from ts_alert.utils.io import load_classes, write_json
 from ts_alert.utils.seed import set_seed
 
@@ -222,170 +213,8 @@ def letterbox_sample(
     _write_labels(dst_lbl_dir / f"{stem}.txt", adj_boxes)
 
 
-def split_samples(
-    samples: list[dict],
-    ratios: dict,
-    seed: int = 42,
-    hash_size: int = 32,
-    hamming_thresh: int = 50,
-    min_box_px: int = 8,
-    image_size: int = 640,
-    blur_threshold: float = 50.0,
-    dark_threshold: float = 85.0,
-) -> dict[str, list[dict]]:
-    """Chia theo cụm dHash, bảo đảm train chứa các lớp xuất hiện trong dữ liệu."""
-    ratio_tuple = (
-        float(ratios.get("train", 0.7)),
-        float(ratios.get("val", 0.2)),
-        float(ratios.get("test", 0.1)),
-    )
-    img_paths = [Path(sample["image"]) for sample in samples]
-    stem_to_sample = {Path(sample["image"]).stem: sample for sample in samples}
-
-    cluster_res = cluster_images_dhash(
-        img_paths,
-        hash_size=hash_size,
-        hamming_thresh=hamming_thresh,
-    )
-    clusters = cluster_res.get("clusters", {})
-
-    stem_to_classes: defaultdict[str, list[int]] = defaultdict(list)
-    tw, th = image_size, image_size
-    for sample in samples:
-        stem = Path(sample["image"]).stem
-        lbl_p = sample.get("label")
-        if lbl_p and Path(lbl_p).exists():
-            orig_w, orig_h = 960, 540
-            try:
-                with Image.open(sample["image"]) as im:
-                    orig_w, orig_h = im.size
-            except Exception:
-                pass
-            scale = min(tw / orig_w, th / orig_h)
-            for cid, cx, cy, bw, bh in _read_raw_labels(Path(lbl_p)):
-                if (
-                    bw * orig_w * scale >= min_box_px
-                    and bh * orig_h * scale >= min_box_px
-                ):
-                    stem_to_classes[stem].append(cid)
-
-    split_stems = split_clusters_for_classes(
-        clusters=clusters,
-        stem_to_classes=stem_to_classes,
-        img_paths=img_paths,
-        ratio=ratio_tuple,
-        seed=seed,
-        blur_threshold=blur_threshold,
-        dark_threshold=dark_threshold,
-    )
-
-    return {
-        sname: [
-            stem_to_sample[stem]
-            for stem in split_stems.get(sname, [])
-            if stem in stem_to_sample
-        ]
-        for sname in ("train", "val", "test")
-    }
 
 
-def promote_rare_classes_to_train(
-    splits: dict[str, list[dict]],
-    clean_boxes: dict[str, list[tuple[int, float, float, float, float]]],
-    min_train_boxes: int = 10,
-) -> tuple[dict[str, list[dict]], dict[str, Any]]:
-    """Chuyển ảnh chứa lớp thiếu box từ val/test sang train theo nhãn đã lọc.
-
-    Xác định lớp cần chuyển một lần từ số box ban đầu; không sửa các danh sách
-    đầu vào. Metadata lưu số ảnh chuyển và số box trước/sau theo split/class.
-    """
-    if min_train_boxes < 0:
-        raise ValueError("min_train_boxes phải lớn hơn hoặc bằng 0.")
-
-    split_names = ("train", "val", "test")
-    new_splits = {name: list(items) for name, items in splits.items()}
-    for name in split_names:
-        new_splits.setdefault(name, [])
-
-    def _count_boxes(
-        current_splits: dict[str, list[dict]],
-    ) -> dict[str, Counter[int]]:
-        """Đếm toàn bộ box đã lọc theo class_id trong từng split."""
-        return {
-            name: Counter(
-                box[0]
-                for sample in current_splits[name]
-                for box in clean_boxes.get(sample["stem"], [])
-            )
-            for name in split_names
-        }
-
-    counts_before = _count_boxes(new_splits)
-    train_counts = counts_before["train"]
-    val_counts = counts_before["val"]
-    test_counts = counts_before["test"]
-
-    all_classes = sorted(set(train_counts) | set(val_counts) | set(test_counts))
-    promoted_classes = [
-        cid
-        for cid in all_classes
-        if train_counts[cid] < min_train_boxes
-        and (val_counts[cid] > 0 or test_counts[cid] > 0)
-    ]
-    promoted_class_set = set(promoted_classes)
-
-    print(
-        "[promote_rare_classes_to_train] "
-        f"Các class có ít hơn {min_train_boxes} box trong Train cần gom: "
-        f"{promoted_classes}"
-    )
-    for cid in promoted_classes:
-        print(
-            f"[promote_rare_classes_to_train]   Class {cid}: "
-            f"train={train_counts[cid]}, "
-            f"val={val_counts[cid]}, test={test_counts[cid]} box."
-        )
-
-    moved_counts: dict[str, int] = {"val": 0, "test": 0}
-    for name in ("val", "test"):
-        retained: list[dict] = []
-        for sample in new_splits[name]:
-            if any(
-                box[0] in promoted_class_set
-                for box in clean_boxes.get(sample["stem"], [])
-            ):
-                new_splits["train"].append(sample)
-                moved_counts[name] += 1
-            else:
-                retained.append(sample)
-        new_splits[name] = retained
-
-    counts_after = _count_boxes(new_splits)
-    moved_total = moved_counts["val"] + moved_counts["test"]
-
-    print(
-        "[promote_rare_classes_to_train] "
-        f"Chuyển val -> train: {moved_counts['val']} ảnh; "
-        f"test -> train: {moved_counts['test']} ảnh; "
-        f"tổng cộng: {moved_total} ảnh."
-    )
-
-    info: dict[str, Any] = {
-        "min_train_boxes": min_train_boxes,
-        "promoted_classes": promoted_classes,
-        "moved_from_val": moved_counts["val"],
-        "moved_from_test": moved_counts["test"],
-        "moved_total": moved_total,
-        "class_counts_before": {
-            name: {cid: counts_before[name][cid] for cid in all_classes}
-            for name in split_names
-        },
-        "class_counts_after": {
-            name: {cid: counts_after[name][cid] for cid in all_classes}
-            for name in split_names
-        },
-    }
-    return new_splits, info
 
 
 def write_data_yaml(out_dir: Path, class_names: list[str]) -> None:
@@ -454,165 +283,84 @@ def _consolidate_post_resize_leakage(
     hamming_thresh: int = 50,
     hash_size: int = 32,
 ) -> dict[str, Any]:
-    """Dồn thành phần tương đồng dHash theo ưu tiên train, val, test.
+    """Đếm rò rỉ dHash sau resize, giữ nguyên mọi ảnh trong split hiện tại.
 
-    Tính khoảng cách theo khối 256x256 để giới hạn bộ nhớ tạm.
-    Ảnh không tính được dHash vẫn được giữ và thống kê trong split hiện tại.
+    So sánh Hamming theo khối 256x256 để giới hạn bộ nhớ tạm.
+    Ảnh không tính được dHash vẫn được tính trong thống kê đầu ra.
     """
     out_root = Path(out_root)
     img_base = out_root / "images"
     lbl_base = out_root / "labels"
-    splits = ("train", "val", "test")
+    split_names = ("train", "val", "test")
     chunk_size = 256
+    hashes: dict[str, list[np.ndarray]] = {
+        name: [] for name in split_names
+    }
+    split_stats: dict[str, dict[str, int]] = {}
+    total_boxes_kept = 0
 
-    img_split: dict[str, str] = {}
-    hashes: dict[str, np.ndarray] = {}
-
-    for split in splits:
-        s_img_dir = img_base / split
-        if not s_img_dir.is_dir():
-            continue
-        for path in sorted(s_img_dir.glob("*.jpg")):
-            img_split[path.name] = split
+    for name in split_names:
+        images = sorted((img_base / name).glob("*.jpg"))
+        n_boxes = 0
+        for path in images:
             dhash = calculate_dhash(
                 path, hash_size=hash_size, strip_padding=True
             )
             if dhash is not None:
-                hashes[path.name] = np.packbits(dhash)
+                hashes[name].append(np.packbits(dhash))
 
-    popcount = np.array([k.bit_count() for k in range(256)], dtype=np.uint8)
-    names = list(hashes)
-    packed_matrix = (
-        np.stack([hashes[name] for name in names])
-        if names
-        else np.empty((0, (hash_size * hash_size + 7) // 8), dtype=np.uint8)
+            label_path = lbl_base / name / f"{path.stem}.txt"
+            if label_path.is_file():
+                with label_path.open(encoding="utf-8") as file:
+                    n_boxes += sum(1 for line in file if line.strip())
+
+        split_stats[name] = {
+            "n_images": len(images),
+            "n_boxes_out": n_boxes,
+        }
+        total_boxes_kept += n_boxes
+
+    matrices = {
+        name: np.stack(items) if items else None
+        for name, items in hashes.items()
+    }
+    popcount = np.array(
+        [value.bit_count() for value in range(256)],
+        dtype=np.uint8,
     )
 
-    adj: dict[str, list[str]] = {name: [] for name in names}
-    for start_a in range(0, len(names), chunk_size):
-        block_a = packed_matrix[start_a : start_a + chunk_size]
-        for start_b in range(start_a, len(names), chunk_size):
-            block_b = packed_matrix[start_b : start_b + chunk_size]
-            xor = np.bitwise_xor(block_a[:, None, :], block_b[None, :, :])
-            distances = popcount[xor].sum(axis=2, dtype=np.uint16)
-            del xor
-
-            rows, cols = np.nonzero(distances <= hamming_thresh)
-            for local_i, local_j in zip(rows, cols):
-                global_i = start_a + int(local_i)
-                global_j = start_b + int(local_j)
-                if global_j <= global_i:
-                    continue
-                name_i = names[global_i]
-                name_j = names[global_j]
-                adj[name_i].append(name_j)
-                adj[name_j].append(name_i)
-
-    current_split = dict(img_split)
-
-    train_queue = [
-        name for name, split in current_split.items() if split == "train"
-    ]
-    visited_train = set(train_queue)
-    moved_to_train: list[tuple[str, str, str]] = []
-    head = 0
-    while head < len(train_queue):
-        current = train_queue[head]
-        head += 1
-        for neighbor in adj.get(current, []):
-            if neighbor in visited_train:
-                continue
-            visited_train.add(neighbor)
-            train_queue.append(neighbor)
-            if current_split[neighbor] != "train":
-                moved_to_train.append(
-                    (neighbor, current_split[neighbor], "train")
-                )
-                current_split[neighbor] = "train"
-
-    val_queue = [
-        name for name, split in current_split.items() if split == "val"
-    ]
-    visited_val = set(val_queue)
-    moved_to_val: list[tuple[str, str, str]] = []
-    head = 0
-    while head < len(val_queue):
-        current = val_queue[head]
-        head += 1
-        for neighbor in adj.get(current, []):
-            if current_split[neighbor] == "test":
-                moved_to_val.append((neighbor, "test", "val"))
-                current_split[neighbor] = "val"
-                if neighbor not in visited_val:
-                    visited_val.add(neighbor)
-                    val_queue.append(neighbor)
-
-    for name, src_split, dst_split in moved_to_train + moved_to_val:
-        stem = Path(name).stem
-        src_img = img_base / src_split / name
-        dst_img = img_base / dst_split / name
-        if src_img.exists():
-            dst_img.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(src_img, dst_img)
-
-        src_lbl = lbl_base / src_split / f"{stem}.txt"
-        dst_lbl = lbl_base / dst_split / f"{stem}.txt"
-        if src_lbl.exists():
-            dst_lbl.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(src_lbl, dst_lbl)
-
-    def _count_cross_leaks(list1: list[str], list2: list[str]) -> int:
-        """Đếm cặp ảnh tương đồng giữa hai split bằng các khối 256x256."""
-        if not list1 or not list2:
+    def _count_cross_leaks(first: str, second: str) -> int:
+        """Đếm cặp ảnh giữa hai split có Hamming không vượt ngưỡng."""
+        mat1 = matrices[first]
+        mat2 = matrices[second]
+        if mat1 is None or mat2 is None:
             return 0
-        mat1 = np.stack([hashes[name] for name in list1])
-        mat2 = np.stack([hashes[name] for name in list2])
-        count = 0
 
-        for start_a in range(0, len(list1), chunk_size):
+        count = 0
+        for start_a in range(0, len(mat1), chunk_size):
             block_a = mat1[start_a : start_a + chunk_size]
-            for start_b in range(0, len(list2), chunk_size):
+            for start_b in range(0, len(mat2), chunk_size):
                 block_b = mat2[start_b : start_b + chunk_size]
                 xor = np.bitwise_xor(
                     block_a[:, None, :], block_b[None, :, :]
                 )
-                distances = popcount[xor].sum(axis=2, dtype=np.uint16)
+                distances = popcount[xor].sum(axis=2, dtype=np.uint64)
                 del xor
-                count += int(np.count_nonzero(distances <= hamming_thresh))
+                count += int(
+                    np.count_nonzero(distances <= hamming_thresh)
+                )
         return count
 
-    final_tr = [name for name in names if current_split[name] == "train"]
-    final_va = [name for name in names if current_split[name] == "val"]
-    final_te = [name for name in names if current_split[name] == "test"]
-
-    remaining_leaks = {
-        "train_vs_val": _count_cross_leaks(final_tr, final_va),
-        "train_vs_test": _count_cross_leaks(final_tr, final_te),
-        "val_vs_test": _count_cross_leaks(final_va, final_te),
-    }
-
-    split_stats: dict[str, dict[str, int]] = {}
-    total_kept = 0
-    for sname in splits:
-        split_images = list((img_base / sname).glob("*.jpg"))
-        n_boxes = 0
-        for path in split_images:
-            lbl_p = lbl_base / sname / f"{path.stem}.txt"
-            if lbl_p.exists():
-                with open(lbl_p, "r", encoding="utf-8") as file:
-                    n_boxes += sum(1 for line in file if line.strip())
-        split_stats[sname] = {
-            "n_images": len(split_images),
-            "n_boxes_out": n_boxes,
-        }
-        total_kept += n_boxes
-
     return {
-        "moved_to_train": moved_to_train,
-        "moved_to_val": moved_to_val,
+        "moved_to_train": [],
+        "moved_to_val": [],
         "split_stats": split_stats,
-        "total_boxes_kept": total_kept,
-        "remaining_leaks": remaining_leaks,
+        "total_boxes_kept": total_boxes_kept,
+        "remaining_leaks": {
+            "train_vs_val": _count_cross_leaks("train", "val"),
+            "train_vs_test": _count_cross_leaks("train", "test"),
+            "val_vs_test": _count_cross_leaks("val", "test"),
+        },
     }
 
 
@@ -620,7 +368,7 @@ def run_preprocess(
     cfg: dict,
     data_root: str | Path | None = None,
 ) -> dict:
-    """Chạy tiền xử lý, giữ split có sẵn hoặc chia cụm dHash, trả metadata."""
+    """Tiền xử lý presplit cố định và trả metadata chất lượng đầu ra."""
     data = cfg["data"]
     raw_dir = resolve_path(data_root or cfg["paths"]["raw_dir"])
     out_dir = resolve_path(cfg["paths"]["processed_dir"])
@@ -672,41 +420,24 @@ def run_preprocess(
         target_size=(img_size, img_size),
     )
 
-    has_presplit = bool(samples) and all(
-        sample.get("split") in {"train", "val", "test"}
-        for sample in samples
-    )
+    split_mode = "existing"
+    if any(sample.get("split") not in split_names for sample in samples):
+        raise ValueError(
+            "Mọi ảnh phải thuộc presplit train, val hoặc test có sẵn."
+        )
 
-    if has_presplit:
-        split_mode = "existing"
-        print("[run_preprocess] B1: Giữ phân chia Train/Val/Test có sẵn.")
-        splits = {
-            sname: [sample for sample in samples if sample["split"] == sname]
-            for sname in split_names
-        }
-        splits, promo_info = promote_rare_classes_to_train(
-            splits, clean_boxes, min_train_boxes=1
+    splits = {
+        name: [sample for sample in samples if sample["split"] == name]
+        for name in split_names
+    }
+    empty_splits = [name for name in split_names if not splits[name]]
+    if empty_splits:
+        raise ValueError(
+            "Các presplit phải có ít nhất một ảnh; split rỗng: "
+            + ", ".join(empty_splits)
         )
-    else:
-        split_mode = "dhash_cluster"
-        print(
-            f"[run_preprocess] B1: Gom cụm dHash {hash_size ** 2}-bit "
-            "và chia tập bảo toàn các lớp cho Train..."
-        )
-        splits = split_samples(
-            samples,
-            data.get("split", {"train": 0.7, "val": 0.2, "test": 0.1}),
-            seed=cfg["seed"],
-            hash_size=hash_size,
-            hamming_thresh=hamming_thresh,
-            min_box_px=min_box_px,
-            image_size=img_size,
-            blur_threshold=blur_threshold,
-            dark_threshold=dark_threshold,
-        )
-        splits, promo_info = promote_rare_classes_to_train(
-            splits, clean_boxes, min_train_boxes=10
-        )
+
+    print("[run_preprocess] B1: Giữ phân chia Train/Val/Test có sẵn.")
 
     augmentation_cap = (
         "không giới hạn"
@@ -914,19 +645,12 @@ def run_preprocess(
         _write_labels(train_lbl_dir / f"{aug_stem}.txt", aug_boxes)
 
     print(
-        "[run_preprocess] B4: Kiểm tra dHash sau resize "
-        "và dồn rò rỉ giữa các split..."
+        "[run_preprocess] B4: Kiểm tra rò rỉ dHash sau resize..."
     )
     consolidation_res = _consolidate_post_resize_leakage(
         out_root=out_dir,
         hamming_thresh=hamming_thresh,
         hash_size=hash_size,
-    )
-    moved_tr = consolidation_res["moved_to_train"]
-    moved_va = consolidation_res["moved_to_val"]
-    print(
-        f"[run_preprocess]   Dồn về Train: {len(moved_tr)} ảnh, "
-        f"dồn về Val: {len(moved_va)} ảnh."
     )
     rem = consolidation_res["remaining_leaks"]
     print(
@@ -974,7 +698,11 @@ def run_preprocess(
         "remaining_leaks": rem,
         "leakage_rate": leakage_rate,
         "elapsed_seconds": round(time.time() - t0, 2),
-        "rare_classes_promoted": promo_info,
+        "rare_classes_promoted": {
+            "min_train_boxes": 0,
+            "promoted_classes": [],
+            "moved_total": 0,
+        },
         "n_augmented_images": len(aug_items),
         "max_augmented_per_class": max_augmented_per_class,
         "split_mode": split_mode,

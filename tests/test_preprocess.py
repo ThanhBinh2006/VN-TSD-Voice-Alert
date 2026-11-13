@@ -1,5 +1,3 @@
-import tempfile
-from copy import deepcopy
 from pathlib import Path
 import random
 from typing import Any
@@ -20,9 +18,7 @@ from ts_alert.data.helpers.augmentation import (
 from ts_alert.data.preprocess_offline import (
     letterbox_sample,
     list_raw_samples,
-    promote_rare_classes_to_train,
     run_preprocess,
-    split_samples,
     write_data_yaml,
 )
 
@@ -75,33 +71,6 @@ def test_letterbox_sample(tmp_path: Path):
     assert abs(bh - 0.125) < 1e-3
 
 
-def test_split_samples_no_leakage(tmp_path: Path):
-    """Kiểm tra split_samples phân chia không có rò rỉ (không có ảnh trùng giữa các tập)."""
-    raw_dir = tmp_path / "raw"
-    (raw_dir / "images").mkdir(parents=True)
-    (raw_dir / "labels").mkdir(parents=True)
-
-    # Tạo 20 ảnh mẫu
-    samples = []
-    for i in range(20):
-        stem = f"sample_{i:03d}"
-        img_p = raw_dir / "images" / f"{stem}.jpg"
-        lbl_p = raw_dir / "labels" / f"{stem}.txt"
-        cv2.imwrite(str(img_p), np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8))
-        with open(lbl_p, "w", encoding="utf-8") as f:
-            f.write(f"{i % 3} 0.5 0.5 0.4 0.4\n")
-        samples.append({"image": img_p, "label": lbl_p, "stem": stem})
-
-    splits = split_samples(samples, ratios={"train": 0.7, "val": 0.2, "test": 0.1}, seed=42)
-
-    tr_stems = {s["stem"] for s in splits["train"]}
-    va_stems = {s["stem"] for s in splits["val"]}
-    te_stems = {s["stem"] for s in splits["test"]}
-
-    assert tr_stems.isdisjoint(va_stems), "Rò rỉ giữa train và val!"
-    assert tr_stems.isdisjoint(te_stems), "Rò rỉ giữa train và test!"
-    assert va_stems.isdisjoint(te_stems), "Rò rỉ giữa val và test!"
-    assert len(tr_stems) + len(va_stems) + len(te_stems) == len(samples)
 
 
 def test_write_data_yaml(tmp_path: Path):
@@ -116,131 +85,8 @@ def test_write_data_yaml(tmp_path: Path):
     assert "images/train" in content
 
 
-def test_split_samples_custom_quality_thresholds(tmp_path: Path):
-    """Kiểm tra split_samples hỗ trợ truyền tuỳ biến blur_threshold và dark_threshold."""
-    raw_dir = tmp_path / "raw"
-    (raw_dir / "images").mkdir(parents=True)
-    (raw_dir / "labels").mkdir(parents=True)
-
-    samples = []
-    for i in range(15):
-        stem = f"sample_{i:03d}"
-        img_p = raw_dir / "images" / f"{stem}.jpg"
-        lbl_p = raw_dir / "labels" / f"{stem}.txt"
-        img = np.random.randint(50, 200, (120, 120, 3), dtype=np.uint8)
-        if i % 3 == 0:
-            # Ảnh mờ (blur nhẹ)
-            img = cv2.GaussianBlur(img, (9, 9), 3.0)
-        cv2.imwrite(str(img_p), img)
-        with open(lbl_p, "w", encoding="utf-8") as f:
-            f.write(f"{i % 2} 0.5 0.5 0.3 0.3\n")
-        samples.append({"image": img_p, "label": lbl_p, "stem": stem})
-
-    splits = split_samples(
-        samples,
-        ratios={"train": 0.6, "val": 0.2, "test": 0.2},
-        seed=42,
-        blur_threshold=50.0,
-        dark_threshold=85.0,
-    )
-    assert len(splits["train"]) > 0
-    assert len(splits["val"]) > 0
-    assert len(splits["test"]) > 0
-    assert sum(len(v) for v in splits.values()) == len(samples)
 
 
-def test_promote_rare_classes_to_train_moves_only_matching_images() -> None:
-    """Chỉ chuyển ảnh chứa lớp hiếm cần gom, giữ nguyên ảnh cùng cụm còn lại."""
-    box_type = tuple[int, float, float, float, float]
-
-    def make_boxes(cid: int, count: int) -> list[box_type]:
-        """Tạo số box xác định cho một lớp."""
-        return [(cid, 0.5, 0.5, 0.25, 0.25) for _ in range(count)]
-
-    splits: dict[str, list[dict[str, Any]]] = {
-        "train": [
-            {"stem": "train_common"},
-            {"stem": "train_rare"},
-            {"stem": "train_only"},
-        ],
-        "val": [
-            {"stem": "val_rare_a", "cluster": "val_cluster"},
-            {"stem": "val_rare_b", "cluster": "val_cluster"},
-            {"stem": "val_common", "cluster": "val_cluster"},
-        ],
-        "test": [
-            {"stem": "test_rare", "cluster": "test_cluster"},
-            {"stem": "test_common", "cluster": "test_cluster"},
-        ],
-    }
-    clean_boxes = {
-        "train_common": make_boxes(0, 10),
-        "train_rare": make_boxes(1, 6),
-        "train_only": make_boxes(2, 4),
-        # Sau ảnh đầu tiên, class 1 đã đạt 10 box; ảnh còn lại vẫn phải chuyển.
-        "val_rare_a": make_boxes(1, 4),
-        "val_rare_b": make_boxes(1, 1) + make_boxes(0, 1),
-        "val_common": make_boxes(0, 2),
-        "test_rare": make_boxes(1, 2),
-        "test_common": make_boxes(0, 3),
-    }
-    original_splits = deepcopy(splits)
-    original_boxes = deepcopy(clean_boxes)
-
-    result, info = promote_rare_classes_to_train(
-        splits,
-        clean_boxes,
-        min_train_boxes=10,
-    )
-
-    assert splits == original_splits
-    assert clean_boxes == original_boxes
-    assert result is not splits
-    for name in ("train", "val", "test"):
-        assert result[name] is not splits[name]
-
-    assert info["promoted_classes"] == [1]
-    assert info["moved_from_val"] == 2
-    assert info["moved_from_test"] == 1
-    assert info["moved_total"] == 3
-
-    assert [sample["stem"] for sample in result["train"]] == [
-        "train_common",
-        "train_rare",
-        "train_only",
-        "val_rare_a",
-        "val_rare_b",
-        "test_rare",
-    ]
-    assert [sample["stem"] for sample in result["val"]] == ["val_common"]
-    assert [sample["stem"] for sample in result["test"]] == ["test_common"]
-
-    for name in ("val", "test"):
-        assert all(
-            box[0] != 1
-            for sample in result[name]
-            for box in clean_boxes[sample["stem"]]
-        )
-
-    assert info["class_counts_before"] == {
-        "train": {0: 10, 1: 6, 2: 4},
-        "val": {0: 3, 1: 5, 2: 0},
-        "test": {0: 3, 1: 2, 2: 0},
-    }
-    assert info["class_counts_after"] == {
-        "train": {0: 11, 1: 13, 2: 4},
-        "val": {0: 2, 1: 0, 2: 0},
-        "test": {0: 3, 1: 0, 2: 0},
-    }
-
-    original_stems = [
-        sample["stem"] for items in splits.values() for sample in items
-    ]
-    result_stems = [
-        sample["stem"] for items in result.values() for sample in items
-    ]
-    assert sorted(result_stems) == sorted(original_stems)
-    assert len(result_stems) == len(set(result_stems))
 
 
 @pytest.mark.parametrize(
@@ -548,11 +394,11 @@ def test_augmentation_never_augments_classes_with_100_boxes(
         assert len(_read_raw_labels(lbl_dir / f"class_{cid}.txt")) == count
 
 
-def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
+def test_run_preprocess_fixed_splits_no_blur(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Giữ split có sẵn, augment không blur và dồn ảnh rò rỉ sau letterbox."""
+    """Giữ cố định split, phát hiện rò rỉ, augment không blur và letterbox."""
     raw_dir = tmp_path / "raw"
     processed_dir = tmp_path / "processed"
     classes_csv = tmp_path / "classes.csv"
@@ -677,41 +523,46 @@ def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
         augmented_class_counts[cid] = augmented_class_counts.get(cid, 0) + 1
     assert augmented_class_counts == {0: 6, 1: 10}
     assert sum(augmented_class_counts.values()) == meta["n_augmented_images"]
-    assert meta["leakage_rate"] == 0.0
     assert meta["remaining_leaks"] == {
         "train_vs_val": 0,
-        "train_vs_test": 0,
+        "train_vs_test": 1,
         "val_vs_test": 0,
     }
+    assert meta["counts"] == {
+        "train": 2 + meta["n_augmented_images"],
+        "val": 1,
+        "test": 2,
+    }
+    cross_split_pairs = (
+        meta["counts"]["train"] * meta["counts"]["val"]
+        + meta["counts"]["train"] * meta["counts"]["test"]
+        + meta["counts"]["val"] * meta["counts"]["test"]
+    )
+    assert meta["leakage_rate"] == pytest.approx(
+        100.0 / cross_split_pairs
+    )
+    assert meta["rare_classes_promoted"] == {
+        "min_train_boxes": 0,
+        "promoted_classes": [],
+        "moved_total": 0,
+    }
 
-    # Hai lớp đều đã có trong train: ảnh trùng được chuyển bởi bước dHash.
-    assert meta["rare_classes_promoted"]["moved_total"] == 0
-    assert (
-        processed_dir / "images" / "train" / "leaked_from_train.jpg"
-    ).exists()
-    assert not (
-        processed_dir / "images" / "test" / "leaked_from_train.jpg"
-    ).exists()
-    assert (
-        processed_dir / "labels" / "train" / "leaked_from_train.txt"
-    ).exists()
-    assert not (
-        processed_dir / "labels" / "test" / "leaked_from_train.txt"
-    ).exists()
-
-    # Các ảnh độc lập tiếp tục ở đúng split ban đầu.
-    assert (
-        processed_dir / "images" / "train" / "train_common.jpg"
-    ).exists()
-    assert (
-        processed_dir / "images" / "train" / "train_rare.jpg"
-    ).exists()
-    assert (
-        processed_dir / "images" / "val" / "val_unique.jpg"
-    ).exists()
-    assert (
-        processed_dir / "images" / "test" / "test_unique.jpg"
-    ).exists()
+    expected_originals = {
+        "train": {"train_common", "train_rare"},
+        "val": {"val_unique"},
+        "test": {"test_unique", "leaked_from_train"},
+    }
+    for split, expected_stems in expected_originals.items():
+        actual_stems = {
+            path.stem
+            for path in (processed_dir / "images" / split).glob("*.jpg")
+            if "_aug_" not in path.stem
+        }
+        assert actual_stems == expected_stems
+        for stem in expected_stems:
+            assert (
+                processed_dir / "labels" / split / f"{stem}.txt"
+            ).is_file()
 
     output_images: list[Path] = []
     for split in ("train", "val", "test"):
