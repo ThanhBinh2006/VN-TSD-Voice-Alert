@@ -10874,7 +10874,7 @@
     },
     "dhash_test_to_train": {
       "min_hamming_dhash": 51,
-      "median_hamming_dhash": 161.0,
+      "median_hamming_dhash": 156.0,
       "near_duplicates_count": 0,
       "near_duplicates_pct": 0.0,
       "dhash_threshold": 50
@@ -10883,8 +10883,8 @@
   },
   "quality": {
     "samples_analyzed": 999,
-    "mean_brightness": 84.07,
-    "median_sharpness": 699.88,
-    "blur_pct": 6.91
+    "mean_brightness": 80.92,
+    "median_sharpness": 723.67,
+    "blur_pct": 6.61
   }
 }
