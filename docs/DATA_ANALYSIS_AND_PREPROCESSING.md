@@ -2,7 +2,7 @@
 
 Tài liệu mô tả chi tiết 2 quy trình cốt lõi thuộc giai đoạn chuẩn bị dữ liệu trong dự án **TSD-Voice-Alert** (Hệ thống Phát hiện Biển báo Giao thông & Cảnh báo Giọng nói Thông minh):
 1. **Khám phá & Phân tích Dữ liệu (Exploratory Data Analysis - EDA)** trên tập ảnh thô (`data/raw`) và tập sau tiền xử lý (`data/processed`).
-2. **Quy trình Tiền xử lý Offline Chuẩn hóa** tạo bộ nhớ đệm (cache) chuẩn hóa $640 \times 640$, cố định phân chia cố định (Presplit) 70% Train, 20% Val, 10% Test, bảo toàn đầy đủ 90 lớp biển báo và kiểm soát rò rỉ dữ liệu (Data Leakage Control).
+2. **Quy trình Tiền xử lý Offline 6 Bước (Offline Preprocessing Pipeline)** tạo bộ nhớ đệm (cache) chuẩn hóa $640 \times 640$, bảo toàn toàn bộ lớp biển báo và triệt tiêu hoàn toàn rò rỉ dữ liệu chuỗi video (0.00% Data Leakage).
 
 ---
 
@@ -29,12 +29,12 @@ Module phân tích được thiết kế theo kiến trúc module hóa tại th�
 - `analysis/eda.py`: Router tự nhận diện cấu trúc thư mục, đồng thời cung cấp các hàm `class_distribution()`, `box_size_stats()`, `center_heatmap()` cho `notebooks/01_data_analysis.ipynb`.
 
 ### 2.1. Phân tích Dữ liệu Thô (RAW Dataset - 8 Biểu đồ)
-Dữ liệu thô gồm **10.231 ảnh** với **20.114 bounding box** trải dài trên 90 lớp biển báo:
+Dữ liệu thô gồm **10.231 ảnh** với **20.114 bounding box** trên 90 lớp biển báo. Phân tích rút ra các đặc tính quan trọng:
 1. **01_class_distribution.png**: Biểu đồ thanh ngang hiển thị đầy đủ cả 90 lớp biển báo (không gộp nhóm "Khác"), thể hiện phân bố mất cân bằng (Long-tail distribution). Biểu đồ sử dụng thang đo đối xứng `symlog` để trực quan hóa rõ cả lớp đa số và lớp cực hiếm.
-2. **02_boxes_per_image.png**: Đa số ảnh chứa từ 1 đến 3 biển báo, một số khung hình giao thông phức tạp chứa tới 10-15 biển báo.
+2. **02_boxes_per_image.png**: Đa số ảnh chứa từ 1 đến 3 biển báo, một số khung hình chứa tới 10-15 biển báo.
 3. **03_box_dimensions.png**: Kích thước box chiếm tỉ lệ nhỏ so với toàn khung hình (trung bình dưới 5% diện tích ảnh). Đa số biển báo thuộc nhóm Small Objects ($< 32 \times 32\text{px}$) và Medium Objects ($32^2 - 96^2\text{px}$).
 4. **04_box_center_heatmap.png**: Mật độ vị trí tâm box tập trung lệch mạnh về nửa bên phải và phần trên của khung hình, phù hợp với thực tế lắp đặt biển báo giao thông tại Việt Nam (lề đường bên phải và giá long môn).
-5. **05_dhash_clusters.png**: Bằng Difference Hash 1024-bit (size 32, khoảng cách Hamming $\le 50$), phát hiện các cụm bối cảnh cảnh quay tương đồng từ camera hành trình.
+5. **05_dhash_clusters.png**: Bằng Difference Hash 1024-bit (size 32, khoảng cách Hamming $\le 50$), phát hiện các cụm bối cảnh chứa nhiều ảnh được cắt liên tiếp từ cùng chuỗi video camera hành trình.
 6. **06_tiny_box_candidates.png**: Lọc bounding box nhỏ hơn 8px trên canvas chuẩn $640 \times 640$ để loại bỏ nhiễu biên quá mờ.
 7. **07_brightness_sharpness.png**: Đánh giá quang học phân bố độ sáng và độ sắc nét Laplacian variance trên tập dữ liệu.
 8. **08_sample_labels.png**: Trực quan hóa ảnh mẫu kèm nhãn bounding box thực tế.
@@ -44,66 +44,73 @@ Dữ liệu thô gồm **10.231 ảnh** với **20.114 bounding box** trải dà
 2. **02_boxes_per_image.png**: Phân bố box sau khi đã lọc sạch tiny box.
 3. **03_box_dimensions.png**: Kích thước box đo trực tiếp trên canvas chuẩn hóa $640 \times 640$.
 4. **04_box_center_heatmap.png**: Bản đồ nhiệt mật độ tâm sau letterbox.
-5. **05_images_per_split.png**: So sánh trực quan số lượng ảnh và số box giữa Train, Val, Test theo tỉ lệ chuẩn 70% - 20% - 10%.
-6. **06_tiny_box_candidates.png**: Xác nhận 0% box nhỏ ($< 8\text{px}$) còn sót lại.
-7. **07_data_leakage.png**: Ma trận kiểm tra rò rỉ dữ liệu dHash giữa Train-Val, Train-Test và Val-Test (ngưỡng Hamming $\le 50$).
+5. **05_images_per_split.png**: So sánh trực quan số lượng ảnh và số box giữa Train, Val, Test.
+6. **06_tiny_box_candidates.png**: **Xác nhận 0% box nhỏ** ($< 8\text{px}$) còn sót lại.
+7. **07_data_leakage.png**: Ma trận kiểm tra rò rỉ dữ liệu dHash: **0 cặp rò rỉ** giữa Train-Val, Train-Test và Val-Test (Trạng thái: **PASSED - 0.00%**).
 8. **08_brightness_sharpness.png**: Phân tích quang học chia thành 3 hàng x 3 cột (Train, Val, Test) chứng minh tính tương đồng phân phối giữa các tập.
 9. **09_sample_labels.png**: Demo ảnh mẫu sau letterbox và cập nhật nhãn bounding box.
 
 ---
 
-## 3. Quy trình Tiền xử lý Offline (Offline Preprocessing)
+## 3. Quy trình Tiền xử lý Offline 6 Bước (Offline Preprocessing)
 
 Quy trình tiền xử lý được lập trình trong `ts_alert/data/preprocess_offline.py` và gọi qua CLI `tools/run_preprocess.py`.
 
 ```mermaid
 flowchart TD
-    A["Raw Dataset Presplit (10,231 ảnh: 7,162 Train / 2,046 Val / 1,023 Test)"] --> B["BƯỚC 1: Đọc Presplit & Lọc bỏ Tiny Box (< 8px trên canvas 640x640)"]
-    B --> C["BƯỚC 2: Cố định Presplit 70/20/10 (Khóa cố định layout, bảo toàn 90/90 lớp)"]
-    C --> D["BƯỚC 3: Offline Augmentation có kiểm soát (Capped <= 10 ảnh cho lớp < 100 box)"]
-    D --> E["BƯỚC 4: Letterbox 640x640 (Pad màu đen 0) & Cập nhật nhãn YOLO"]
-    E --> F["BƯỚC 5: Đối soát dHash Non-destructive (Ngưỡng Hamming <= 50, bảo toàn số lượng ảnh)"]
-    F --> G["Processed Cache: data/processed/ (data.yaml, meta.json, images/, labels/)"]
+    A["Raw Dataset (10,231 ảnh, 20,114 box)"] --> B["BƯỚC 1: Lọc bỏ Bounding Box nhỏ (< 8px trên canvas 640x640)"]
+    B --> C["BƯỚC 2: Gom cụm bối cảnh bằng dHash 1024-bit (Hamming <= 50)"]
+    C --> D["BƯỚC 3: Phân chia cụm Train / Val / Test (Bảo toàn các lớp trong Train)"]
+    D --> D2["BƯỚC 3.5: Gom ảnh chứa lớp < 10 box trong Train từ Val/Test lên Train"]
+    D2 --> E["BƯỚC 4: Augmentation adaptive cân bằng nhãn thiểu số (Loại trừ ứng viên rò rỉ)"]
+    E --> F["BƯỚC 5: Letterbox 640x640 (Pad màu đen 0) & Cập nhật nhãn YOLO"]
+    F --> G["BƯỚC 6: Đối soát dHash sau resize & Dồn tập triệt để (0.00% Leakage)"]
+    G --> H["Processed Cache: data/processed/ (data.yaml, meta.json, images/, labels/)"]
 ```
 
-### Bước 1: Nạp Presplit & Lọc Bounding Box nhỏ (< 8px)
-- Kiểm tra chặt chẽ cấu trúc thư mục presplit `data/raw/images/{train,val,test}` và `data/raw/labels/{train,val,test}`.
+### Bước 1: Lọc Bounding Box nhỏ (< 8px)
 - Với mỗi ảnh thô, tính hệ số tỉ lệ $scale = \min(640 / W_{orig}, 640 / H_{orig})$.
 - Nếu $bw \times W_{orig} \times scale < 8\text{px}$ hoặc $bh \times H_{orig} \times scale < 8\text{px}$, box bị loại bỏ để tránh gây nhiễu gradient khi huấn luyện.
 
-### Bước 2: Cố định Phân chia Tập dữ liệu (Fixed Presplit 70/20/10)
-- Tập dữ liệu thô đã được phân chia theo thuật toán phân tầng đa nhãn (Multilabel Iterative Stratification) đạt chính xác tỉ lệ **70% Train, 20% Val, 10% Test**.
-- **100% tất cả 90 lớp** đều có mặt ở cả 3 tập (Train, Val, Test), loại bỏ hoàn toàn tình trạng mất cân bằng lớp ở các tập kiểm định và kiểm tra.
-- Toàn bộ logic chia split động và gom cụm runtime cũ (`split_samples`, `promote_rare_classes_to_train`) đã được dọn dẹp để đảm bảo tính tái lập và nhất quán tuyệt đối.
+### Bước 2: Gom cụm bằng Difference Hash 1024-bit
+- Ánh xạ mỗi ảnh thành vector nhị phân 1.024-bit ($32 \times 32$).
+- Áp dụng thuật toán gom cụm đồ thị với ngưỡng khoảng cách Hamming $\le 50$.
+- Toàn bộ các ảnh thuộc cùng chuỗi video liên tiếp được gom thành từng cụm bối cảnh độc lập.
 
-### Bước 3: Augmentation Cân bằng Lớp Thiểu số trong Train
+### Bước 3: Phân chia Cụm Bảo tồn Lớp (Cluster Splitting & Class Preservation)
+- Quy tắc nguyên tử: **Toàn bộ ảnh trong cùng một cụm phải thuộc về cùng một tập (Train, Val hoặc Test)** để loại trừ hiện tượng rò rỉ chuỗi video.
+- Áp dụng giải thuật tối ưu:
+  1. Bắt buộc tập **Train phải có mặt đầy đủ các lớp có nhãn hợp lệ**.
+  2. Cân bằng phân phối độ sáng (ảnh tối, `dark_threshold=85.0`) và độ nét (ảnh mờ, `blur_threshold=10.0`) giữa các tập.
+  3. Phân bổ các cụm theo tỉ lệ mục tiêu `split: {train: 0.7, val: 0.2, test: 0.1}`.
+
+### Bước 3.5: Gom Ảnh Chứa Lớp Hiếm (< 10 Box trong Train) lên Train
+- Sau khi phân chia cụm ở Bước 3, hệ thống rà soát các lớp có số box thật trong Train `< 10` nhưng vẫn xuất hiện ở Val hoặc Test (`promote_rare_classes_to_train`).
+- Chuyển các ảnh ở Val/Test có chứa các lớp này lên Train để bảo đảm tập huấn luyện có đủ mẫu đại diện.
+
+### Bước 4: Augmentation Cân bằng Lớp Thiểu số trong Train
 - Chỉ áp dụng trên tập Train cho các lớp có số lượng bounding box thật `< 100`.
 - Các lớp có $\ge 100$ bounding box thật được giữ nguyên, không áp dụng tăng cường ngoại tuyến.
 - **Giới hạn tối đa (Cap)**: Mỗi lớp thiểu số chỉ được sinh tối đa **10 ảnh mới** (`max_augmented_per_class = 10`), tránh làm lệch phân phối tự nhiên.
-- Kỹ thuật sinh ảnh (`transform_and_letterbox_crop`): Cắt an toàn (`get_safe_crop_bounds`), co dãn zoom ($0.85 - 1.25\times$), chỉnh sáng nhẹ, giảm làm mờ, không xoay (để giữ nguyên ngữ nghĩa biển báo).
-- **Cơ chế chống rò rỉ chủ động**: Tính dHash của ảnh sinh mới; nếu khoảng cách Hamming đến bất kỳ ảnh nào trong tập Val hoặc Test $\le 50$, ảnh ứng viên bị từ chối ngay lập tức.
+- Kỹ thuật sinh ảnh (`transform_and_letterbox_crop`): Cắt an toàn (`get_safe_crop_bounds`), co dãn zoom ($0.85 - 1.25\times$), chỉnh sáng nhẹ, không làm mờ, không xoay (để giữ nguyên ngữ nghĩa biển báo).
+- **Cơ chế chống rò rỉ chủ động**: Tính dHash của ảnh sinh mới; nếu khoảng cách Hamming đến bất kỳ ảnh nào trong tập Val hoặc Test $\le 50$, ảnh ứng viên bị **từ chối ngay lập tức**.
 
-### Bước 4: Letterbox 640x640 (Pad màu đen 0)
+### Bước 5: Letterbox 640x640 (Pad màu đen 0)
 - Đưa toàn bộ ảnh về kích thước chuẩn $640 \times 640$ mà không làm méo tỉ lệ hình học biển báo:
   $$scale = \min\left(\frac{640}{W}, \frac{640}{H}\right), \quad dx = \frac{640 - \text{round}(W \times scale)}{2}, \quad dy = \frac{640 - \text{round}(H \times scale)}{2}$$
-- Vùng đệm được tô màu đen đồng nhất với ảnh thô gốc: `pad_value: 0` (`(0, 0, 0)`).
+- Vùng đệm được tô màu đen đồng nhất với ảnh thô: `pad_value: 0` (`(0, 0, 0)`).
 - Tọa độ bounding box được chuyển đổi sang hệ tọa độ chuẩn hóa mới của canvas $640 \times 640$.
 
-### Bước 5: Đối soát sau Resize (Non-destructive dHash Check)
-- Sau khi letterbox và nén JPEG, hệ thống tính dHash 1024-bit của toàn bộ ảnh đầu ra (loại bỏ viền pad để đánh giá đúng nội dung).
-- Thuật toán kiểm tra rò rỉ theo ngưỡng Hamming $\le 50$.
-- Quy trình đối soát hoạt động ở chế độ **không làm biến đổi (non-destructive)**: ghi nhận và tính toán tỉ lệ rò rỉ vào metadata mà **không di chuyển file giữa các split**, bảo toàn tuyệt đối tỉ lệ 70/20/10 và số lớp của từng tập.
+### Bước 6: Đối soát sau Resize & Dồn tập Triệt tiêu Rò rỉ
+- Sau khi letterbox, augment và nén JPEG, hệ thống tính lại dHash toàn bộ ảnh đầu ra (loại bỏ viền pad để đánh giá đúng nội dung).
+- Thuật toán duyệt đồ thị rò rỉ (ngưỡng Hamming $\le 50$):
+  - Nếu ảnh trong Val hoặc Test có khoảng cách Hamming $\le 50$ với Train $\rightarrow$ **Dồn về Train**.
+  - Nếu ảnh trong Test có khoảng cách $\le 50$ với Val $\rightarrow$ **Dồn về Val**.
+- Kết quả cuối cùng: **0 cặp rò rỉ dữ liệu giữa tất cả các tập (100% Sạch - 0.00% Data Leakage)**.
 
 ---
 
-## 4. Thống kê Bộ Dữ liệu Thô và Cấu hình
-
-| Tập dữ liệu | Số lượng ảnh | Tỉ lệ ảnh | Số lượng Box | Tỉ lệ Box | Số lớp xuất hiện |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Train** | 7.162 | 70.0% | 14.103 | 70.1% | **90 / 90** (100%) |
-| **Val** | 2.046 | 20.0% | 4.017 | 20.0% | **90 / 90** (100%) |
-| **Test** | 1.023 | 10.0% | 1.994 | 9.9% | **90 / 90** (100%) |
-| **Tổng cộng** | **10.231** | **100%** | **20.114** | **100%** | **90 / 90** (100%) |
+## 4. Thống kê Bộ Dữ liệu và Cấu hình
 
 - **Cấu hình YOLO (`data/processed/data.yaml`)**:
   ```yaml
@@ -114,7 +121,7 @@ flowchart TD
   nc: 90
   names: {0: "Đường người đi bộ cắt ngang", 1: "Đường giao nhau (ngã ba bên phải)", ...}
   ```
-- **Metadata (`data/processed/meta.json`)**: Lưu vết số lượng ảnh, số box, tham số hạt giống (`seed: 42`), kích thước ảnh (`image_size: 640`), cấu hình pad (`pad_value: 0`), và tỉ lệ rò rỉ (`leakage_rate`).
+- **Metadata (`data/processed/meta.json`)**: Lưu vết số lượng ảnh, số box, tham số hạt giống (`seed: 42`), kích thước ảnh (`image_size: 640`), cấu hình pad (`pad_value: 0`), và tỉ lệ rò rỉ (`leakage_rate: 0.0`).
 
 ---
 
@@ -131,7 +138,7 @@ python -m analysis.eda --data-root data/processed
 
 ### 5.2. Chạy Tiền xử lý Dữ liệu Offline
 ```bash
-# Thực hiện toàn bộ pipeline tiền xử lý tạo cache data/processed/
+# Thực hiện toàn bộ pipeline 6 bước tạo cache data/processed/
 python -m tools.run_preprocess --data-root data/raw
 ```
 
@@ -141,7 +148,10 @@ pytest tests/test_preprocess.py -v
 ```
 Kiểm tra:
 - `test_letterbox_sample`: Kiểm tra kích thước canvas $640\times 640$, viền pad 0 và độ chính xác chuyển đổi toạ độ YOLO.
-- `test_run_preprocess_fixed_splits_no_blur`: Kiểm tra pipeline tiền xử lý giữ cố định presplit (Train/Val/Test), chống rò rỉ dữ liệu và letterbox canvas.
+- `test_split_samples_no_leakage`: Kiểm tra phân chia không có rò rỉ giữa các tập.
+- `test_split_samples_custom_quality_thresholds`: Kiểm tra tham số chất lượng ảnh.
+- `test_promote_rare_classes_to_train_moves_only_matching_images`: Kiểm tra gom mẫu lớp hiếm lên Train.
+- `test_run_preprocess_existing_splits_no_blur_dhash_consolidation`: Kiểm tra toàn bộ pipeline dồn ảnh rò rỉ sau letterbox để đạt 0.00% leakage.
 - `test_write_data_yaml`: Kiểm tra cấu trúc file cấu hình Ultralytics YOLO cho 90 lớp.
 
 ---
