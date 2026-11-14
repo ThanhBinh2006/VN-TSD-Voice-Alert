@@ -227,7 +227,7 @@ def split_samples(
     ratios: dict,
     seed: int = 42,
     hash_size: int = 32,
-    hamming_thresh: int = 50,
+    hamming_thresh: int = 150,
     min_box_px: int = 8,
     image_size: int = 640,
     blur_threshold: float = 50.0,
@@ -451,7 +451,7 @@ def _filter_tiny_boxes(
 
 def _consolidate_post_resize_leakage(
     out_root: Path,
-    hamming_thresh: int = 50,
+    hamming_thresh: int = 150,
     hash_size: int = 32,
 ) -> dict[str, Any]:
     """Dồn thành phần tương đồng dHash theo ưu tiên train, val, test.
@@ -633,6 +633,7 @@ def run_preprocess(
     img_size = int(data.get("image_size", 640))
     pad_val = int(data.get("pad_value", 114))
     preprocess_cfg = cfg.get("preprocess", {})
+    aug_blur = bool(preprocess_cfg.get("aug_blur", True))
     max_augmented_per_class = preprocess_cfg.get(
         "max_augmented_per_class", 10
     )
@@ -647,7 +648,7 @@ def run_preprocess(
     )
     hash_size = int(cfg.get("split", {}).get("hash_size", 32))
     hamming_thresh = int(
-        cfg.get("split", {}).get("hamming_threshold", 50)
+        cfg.get("split", {}).get("hamming_threshold", 150)
     )
     augment_minority = True
     split_names = ("train", "val", "test")
@@ -713,9 +714,10 @@ def run_preprocess(
         if max_augmented_per_class is None
         else f"{max_augmented_per_class} ảnh/lớp"
     )
+    blur_label = "làm mờ nhẹ 15%" if aug_blur else "không làm mờ"
     print(
         "[run_preprocess] B2: Tăng cường lớp thiểu số trong Train "
-        f"(không làm mờ, trần: {augmentation_cap}, "
+        f"({blur_label}, trần: {augmentation_cap}, "
         "chỉ lớp có dưới 100 box)..."
     )
     aug_items: list[
@@ -840,6 +842,7 @@ def run_preprocess(
                     (img_size, img_size),
                     min_box_px,
                     pad_val,
+                    aug_blur=aug_blur,
                 )
                 if canvas is None or final_box is None:
                     continue
@@ -978,7 +981,7 @@ def run_preprocess(
         "n_augmented_images": len(aug_items),
         "max_augmented_per_class": max_augmented_per_class,
         "split_mode": split_mode,
-        "aug_blur": False,
+        "aug_blur": aug_blur,
     }
     write_json(meta, out_dir / "meta.json")
     print(

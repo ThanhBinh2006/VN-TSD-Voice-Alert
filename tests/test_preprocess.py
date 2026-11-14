@@ -330,6 +330,7 @@ def test_augment_minority_classes_capped_uncapped_and_no_blur(
         train_lbl_dir=lbl_dir,
         image_size=(160, 160),
         seed=42,
+        aug_blur=False,
         **cap_kwargs,
     )
 
@@ -410,6 +411,7 @@ def test_augment_minority_classes_capped_uncapped_and_no_blur(
         safe_bounds=(0.0, 0.0, 160.0, 160.0),
         rng=rng,
         target_size=(160, 160),
+        aug_blur=False,
     )
 
     assert canvas is not None
@@ -423,6 +425,56 @@ def test_augment_minority_classes_capped_uncapped_and_no_blur(
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     assert sharpness > 1_000
     assert sharpness == pytest.approx(baseline_sharpness)
+
+
+def test_transform_and_letterbox_crop_aug_blur_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kiểm tra aug_blur=True gọi cv2.GaussianBlur khi xác suất < 0.15 và cấu hình đúng sigma."""
+    sharp_image = np.ones((160, 160, 3), dtype=np.uint8) * 128
+    original_blur = cv2.GaussianBlur
+    blur_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture_blur(*args: Any, **kwargs: Any) -> np.ndarray:
+        blur_calls.append((args, kwargs))
+        return original_blur(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "GaussianBlur", capture_blur)
+
+    class BlurTriggerRandom(random.Random):
+        def random(self) -> float:
+            return 0.10  # < 0.15 để kích hoạt làm mờ
+
+        def uniform(self, a: float, b: float) -> float:
+            if (a, b) == (0.25, 0.50):
+                return 0.35
+            return 1.0
+
+    rng = BlurTriggerRandom(42)
+    canvas, final_box = transform_and_letterbox_crop(
+        img=sharp_image,
+        target_box=(0, 0.5, 0.5, 0.5, 0.5),
+        safe_bounds=(0.0, 0.0, 160.0, 160.0),
+        rng=rng,
+        target_size=(160, 160),
+        aug_blur=True,
+    )
+    assert canvas is not None
+    assert final_box is not None
+    assert len(blur_calls) == 1
+    assert blur_calls[0][0][1] == (3, 3)
+    assert blur_calls[0][1]["sigmaX"] == 0.35
+    assert blur_calls[0][1]["sigmaY"] == 0.35
+
+    # Khi aug_blur=False, không được gọi GaussianBlur dù random() < 0.15
+    blur_calls.clear()
+    transform_and_letterbox_crop(
+        img=sharp_image,
+        target_box=(0, 0.5, 0.5, 0.5, 0.5),
+        safe_bounds=(0.0, 0.0, 160.0, 160.0),
+        rng=rng,
+        target_size=(160, 160),
+        aug_blur=False,
+    )
+    assert len(blur_calls) == 0
 
 
 def test_list_raw_samples_existing_splits_and_stem_collisions(
@@ -644,10 +696,11 @@ def test_run_preprocess_existing_splits_no_blur_dhash_consolidation(
         },
         "preprocess": {
             "min_box_px": 8,
+            "aug_blur": False,
         },
         "split": {
             "hash_size": 32,
-            "hamming_threshold": 50,
+            "hamming_threshold": 150,
         },
     }
 

@@ -130,16 +130,18 @@ TSD-Voice-Alert/
 - **Nguồn dữ liệu**: Bộ dữ liệu biển báo giao thông Việt Nam gồm **90 lớp** theo chuẩn QCVN 41:2019/BGTVT trong [`configs/classes.csv`](configs/classes.csv).
 - **Tiền xử lý Offline 6 bước** ([`ts_alert/data/preprocess_offline.py`](ts_alert/data/preprocess_offline.py), chi tiết tại [`docs/DATA_ANALYSIS_AND_PREPROCESSING.md`](docs/DATA_ANALYSIS_AND_PREPROCESSING.md)):
   1. Lọc bỏ bounding box quá nhỏ (`< 8px` trên canvas `640×640`).
-  2. Gom cụm bối cảnh ảnh chuỗi video bằng **dHash 1024-bit** (`Hamming <= 50`).
-  3. Chia cụm `Train / Val / Test` bảo đảm đầy đủ các lớp có mặt trong Train và cân bằng ảnh mờ/tối.
+  2. Gom cụm bối cảnh ảnh chuỗi video bằng **dHash 1024-bit** (`Hamming <= 150`).
+  3. Chia cụm `Train / Val / Test` bảo đảm đầy đủ các lớp có mặt trong Train và cân bằng ảnh mờ/tối (mục tiêu 60% Train, 20% Val, 20% Test).
   4. Tăng cường có kiểm soát cho các lớp thiểu số trong Train (tối đa `10` ảnh sinh mới/lớp, từ chối ảnh nếu dHash trùng cụm Val/Test).
   5. Chuẩn hóa **letterbox `640×640`** (pad màu đen `pad_value: 0`) và cập nhật tọa độ nhãn YOLO.
   6. Đối soát rò rỉ sau resize & dồn tập triệt để -> **0.00% Data Leakage**.
 
-| Tập dữ liệu | Số ảnh | Số bounding box | Lớp xuất hiện | Ghi chú |
-|---|---:|---:|:---:|---|
-| **Gốc (`data/raw`)** | 10.231 | 20.114 | 90 / 90 | Đầy đủ 90 lớp biển báo |
-| **Processed Cache (`data/processed`)** | Đã tiền xử lý | Đã lọc tiny box | Bảo toàn trong Train | 0.00% rò rỉ bối cảnh video (dHash <= 50) |
+| Tập dữ liệu | Số ảnh | Tỉ lệ | Số bounding box | Lớp xuất hiện | Ghi chú |
+|---|---:|---:|---:|:---:|---|
+| **Train (`data/raw`)** | 6.139 | 60.0% | 11.719 | **90 / 90** | Đầy đủ 90 lớp biển báo |
+| **Val (`data/raw`)** | 2.046 | 20.0% | 4.017 | **90 / 90** | Đầy đủ 90 lớp biển báo |
+| **Test (`data/raw`)** | 2.046 | 20.0% | 4.378 | **90 / 90** | Đầy đủ 90 lớp biển báo |
+| **Tổng cộng (`data/raw`)** | **10.231** | **100.0%** | **20.114** | **90 / 90** | Cố định presplit dùng chung cho cả YOLO26m & Faster R-CNN |
 
 - **Tiền xử lý Online** ([`ts_alert/data/preprocess_online.py`](ts_alert/data/preprocess_online.py)): Mặc định **TẮT** (`online_preprocess.enabled: false`) để so sánh công bằng hai mô hình trên tập dữ liệu offline chuẩn. Khi bật (`--online` hoặc `ONLINE = True`):
   - **Cả 2 pipeline**: hỗ trợ biến đổi màu HSV (`hsv_h`, `hsv_s`, `hsv_v`), lật ngang (`hflip`, mặc định `false` do biển báo nhạy hướng) và **che khuất một phần góc/cạnh box** (`occlusion_p`, `occlusion_ratio`).

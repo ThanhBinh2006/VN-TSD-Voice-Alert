@@ -123,8 +123,9 @@ def transform_and_letterbox_crop(
     target_size: tuple[int, int] = (640, 640),
     min_box_px: int = 8,
     pad_value: int = 114,
+    aug_blur: bool = True,
 ) -> tuple[np.ndarray, tuple[int, float, float, float, float]] | tuple[None, None]:
-    """Cắt an toàn, zoom, chỉnh sáng/tương phản và letterbox; không làm mờ, không xoay."""
+    """Cắt an toàn, zoom, chỉnh sáng/tương phản, làm mờ nhẹ tuỳ chọn và letterbox, không xoay."""
     H, W = img.shape[:2]
     cid, t_cx, t_cy, t_bw, t_bh = target_box
     bx1 = (t_cx - t_bw / 2.0) * W
@@ -170,6 +171,13 @@ def transform_and_letterbox_crop(
 
     if (nbx2 - nbx1) < min_box_px or (nby2 - nby1) < min_box_px:
         return None, None
+
+    # Làm mờ rất nhẹ (xác suất 15%, kernel 3x3, sigma 0.25–0.50)
+    if aug_blur and rng.random() < 0.15:
+        sigma = rng.uniform(0.25, 0.50)
+        transformed_crop = cv2.GaussianBlur(
+            transformed_crop, (3, 3), sigmaX=sigma, sigmaY=sigma
+        )
 
     # Chỉnh sáng và tương phản nhẹ
     alpha = rng.uniform(0.88, 1.15)
@@ -217,7 +225,8 @@ def augment_minority_classes(
     pad_value: int = 114,
     max_augmented_per_class: int | None = 10,
     seed: int = 42,
-    hamming_thresh: int = 50,
+    hamming_thresh: int = 150,
+    aug_blur: bool = True,
 ) -> dict[str, Any]:
     """Cân bằng dữ liệu cho các lớp trong tập Train, không xoay.
 
@@ -372,6 +381,7 @@ def augment_minority_classes(
                     target_size=image_size,
                     min_box_px=min_box_px,
                     pad_value=pad_value,
+                    aug_blur=aug_blur,
                 )
                 if canvas is None or final_box is None:
                     continue
