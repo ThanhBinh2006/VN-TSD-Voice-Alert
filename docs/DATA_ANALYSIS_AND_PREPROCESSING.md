@@ -34,7 +34,7 @@ Dữ liệu thô gồm **10.231 ảnh** với **20.114 bounding box** trên 90 l
 2. **02_boxes_per_image.png**: Đa số ảnh chứa từ 1 đến 3 biển báo, một số khung hình chứa tới 10-15 biển báo.
 3. **03_box_dimensions.png**: Kích thước box chiếm tỉ lệ nhỏ so với toàn khung hình (trung bình dưới 5% diện tích ảnh). Đa số biển báo thuộc nhóm Small Objects ($< 32 \times 32\text{px}$) và Medium Objects ($32^2 - 96^2\text{px}$).
 4. **04_box_center_heatmap.png**: Mật độ vị trí tâm box tập trung lệch mạnh về nửa bên phải và phần trên của khung hình, phù hợp với thực tế lắp đặt biển báo giao thông tại Việt Nam (lề đường bên phải và giá long môn).
-5. **05_dhash_clusters.png**: Bằng Difference Hash 1024-bit (size 32, khoảng cách Hamming $\le 50$), phát hiện các cụm bối cảnh chứa nhiều ảnh được cắt liên tiếp từ cùng chuỗi video camera hành trình.
+5. **05_dhash_clusters.png**: Bằng Difference Hash 1024-bit (size 32, khoảng cách Hamming $\le 150$), phát hiện các cụm bối cảnh chứa nhiều ảnh được cắt liên tiếp từ cùng chuỗi video camera hành trình.
 6. **06_tiny_box_candidates.png**: Lọc bounding box nhỏ hơn 8px trên canvas chuẩn $640 \times 640$ để loại bỏ nhiễu biên quá mờ.
 7. **07_brightness_sharpness.png**: Đánh giá quang học phân bố độ sáng và độ sắc nét Laplacian variance trên tập dữ liệu.
 8. **08_sample_labels.png**: Trực quan hóa ảnh mẫu kèm nhãn bounding box thực tế.
@@ -59,7 +59,7 @@ Quy trình tiền xử lý được lập trình trong `ts_alert/data/preprocess
 ```mermaid
 flowchart TD
     A["Raw Dataset (10,231 ảnh, 20,114 box)"] --> B["BƯỚC 1: Lọc bỏ Bounding Box nhỏ (< 8px trên canvas 640x640)"]
-    B --> C["BƯỚC 2: Gom cụm bối cảnh bằng dHash 1024-bit (Hamming <= 50)"]
+    B --> C["BƯỚC 2: Gom cụm bối cảnh bằng dHash 1024-bit (Hamming <= 150)"]
     C --> D["BƯỚC 3: Phân chia cụm Train / Val / Test (Bảo toàn các lớp trong Train)"]
     D --> D2["BƯỚC 3.5: Gom ảnh chứa lớp < 10 box trong Train từ Val/Test lên Train"]
     D2 --> E["BƯỚC 4: Augmentation adaptive cân bằng nhãn thiểu số (Loại trừ ứng viên rò rỉ)"]
@@ -74,7 +74,7 @@ flowchart TD
 
 ### Bước 2: Gom cụm bằng Difference Hash 1024-bit
 - Ánh xạ mỗi ảnh thành vector nhị phân 1.024-bit ($32 \times 32$).
-- Áp dụng thuật toán gom cụm đồ thị với ngưỡng khoảng cách Hamming $\le 50$.
+- Áp dụng thuật toán gom cụm đồ thị với ngưỡng khoảng cách Hamming $\le 150$.
 - Toàn bộ các ảnh thuộc cùng chuỗi video liên tiếp được gom thành từng cụm bối cảnh độc lập.
 
 ### Bước 3: Phân chia Cụm Bảo tồn Lớp (Cluster Splitting & Class Preservation)
@@ -82,7 +82,7 @@ flowchart TD
 - Áp dụng giải thuật tối ưu:
   1. Bắt buộc tập **Train phải có mặt đầy đủ các lớp có nhãn hợp lệ**.
   2. Cân bằng phân phối độ sáng (ảnh tối, `dark_threshold=85.0`) và độ nét (ảnh mờ, `blur_threshold=10.0`) giữa các tập.
-  3. Phân bổ các cụm theo tỉ lệ mục tiêu `split: {train: 0.7, val: 0.2, test: 0.1}`.
+  3. Phân bổ các cụm theo tỉ lệ mục tiêu `split: {train: 0.6, val: 0.2, test: 0.2}`.
 
 ### Bước 3.5: Gom Ảnh Chứa Lớp Hiếm (< 10 Box trong Train) lên Train
 - Sau khi phân chia cụm ở Bước 3, hệ thống rà soát các lớp có số box thật trong Train `< 10` nhưng vẫn xuất hiện ở Val hoặc Test (`promote_rare_classes_to_train`).
@@ -93,7 +93,7 @@ flowchart TD
 - Các lớp có $\ge 100$ bounding box thật được giữ nguyên, không áp dụng tăng cường ngoại tuyến.
 - **Giới hạn tối đa (Cap)**: Mỗi lớp thiểu số chỉ được sinh tối đa **10 ảnh mới** (`max_augmented_per_class = 10`), tránh làm lệch phân phối tự nhiên.
 - Kỹ thuật sinh ảnh (`transform_and_letterbox_crop`): Cắt an toàn (`get_safe_crop_bounds`), co dãn zoom ($0.85 - 1.25\times$), chỉnh sáng nhẹ, không làm mờ, không xoay (để giữ nguyên ngữ nghĩa biển báo).
-- **Cơ chế chống rò rỉ chủ động**: Tính dHash của ảnh sinh mới; nếu khoảng cách Hamming đến bất kỳ ảnh nào trong tập Val hoặc Test $\le 50$, ảnh ứng viên bị **từ chối ngay lập tức**.
+- **Cơ chế chống rò rỉ chủ động**: Tính dHash của ảnh sinh mới; nếu khoảng cách Hamming đến bất kỳ ảnh nào trong tập Val hoặc Test $\le 150$, ảnh ứng viên bị **từ chối ngay lập tức**.
 
 ### Bước 5: Letterbox 640x640 (Pad màu đen 0)
 - Đưa toàn bộ ảnh về kích thước chuẩn $640 \times 640$ mà không làm méo tỉ lệ hình học biển báo:
@@ -103,14 +103,21 @@ flowchart TD
 
 ### Bước 6: Đối soát sau Resize & Dồn tập Triệt tiêu Rò rỉ
 - Sau khi letterbox, augment và nén JPEG, hệ thống tính lại dHash toàn bộ ảnh đầu ra (loại bỏ viền pad để đánh giá đúng nội dung).
-- Thuật toán duyệt đồ thị rò rỉ (ngưỡng Hamming $\le 50$):
-  - Nếu ảnh trong Val hoặc Test có khoảng cách Hamming $\le 50$ với Train $\rightarrow$ **Dồn về Train**.
-  - Nếu ảnh trong Test có khoảng cách $\le 50$ với Val $\rightarrow$ **Dồn về Val**.
+- Thuật toán duyệt đồ thị rò rỉ (ngưỡng Hamming $\le 150$):
+  - Nếu ảnh trong Val hoặc Test có khoảng cách Hamming $\le 150$ với Train $\rightarrow$ **Dồn về Train**.
+  - Nếu ảnh trong Test có khoảng cách $\le 150$ với Val $\rightarrow$ **Dồn về Val**.
 - Kết quả cuối cùng: **0 cặp rò rỉ dữ liệu giữa tất cả các tập (100% Sạch - 0.00% Data Leakage)**.
 
 ---
 
-## 4. Thống kê Bộ Dữ liệu và Cấu hình
+## 4. Thống kê Bộ Dữ liệu Thô và Cấu hình
+
+| Tập dữ liệu | Số lượng ảnh | Tỉ lệ ảnh | Số lượng Box | Tỉ lệ Box | Số lớp xuất hiện |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Train** | 6.139 | 60.0% | 11.719 | 58.3% | **90 / 90** (100%) |
+| **Val** | 2.046 | 20.0% | 4.017 | 20.0% | **90 / 90** (100%) |
+| **Test** | 2.046 | 20.0% | 4.378 | 21.8% | **90 / 90** (100%) |
+| **Tổng cộng** | **10.231** | **100%** | **20.114** | **100%** | **90 / 90** (100%) |
 
 - **Cấu hình YOLO (`data/processed/data.yaml`)**:
   ```yaml

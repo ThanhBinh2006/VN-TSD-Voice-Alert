@@ -8,18 +8,22 @@ data:
                                 # Trên Kaggle: đặt đường dẫn dataset đã gắn (Add Input) qua notebook / --data-root.
   image_size: 640               # letterbox 640x640 cho cả hai mô hình
   pad_value: 0
-  split: {train: 0.7, val: 0.2, test: 0.1}   # TODO: nhóm chốt tỉ lệ
+  split: {train: 0.6, val: 0.2, test: 0.2}   # 60% Train, 20% Val, 20% Test
   num_classes: null             # TODO: số lớp biển báo của dataset. Để null thì đếm từ configs/classes.csv.
                                 # Faster R-CNN: box predictor = num_classes + 1 (thêm background).
   blur_threshold: 10.0          # Ngưỡng Laplacian variance xác định ảnh mờ (hạ từ 100 xuống 50 để tránh gán nhầm ảnh đường sá bình thường)
   dark_threshold: 85.0          # Ngưỡng Grayscale mean xác định ảnh tối
 
+preprocess:
+  min_box_px: 8
+  aug_blur: true                # Bật làm mờ Gaussian Blur nhẹ (15%, sigma 0.25-0.50) khi augment tập Train
+
 train:
   # TỔNG batch trên tất cả GPU. Faster R-CNN (DDP) phải chia bằng ts_alert.runtime.batch.per_rank_batch;
   # YOLO truyền nguyên tổng để Ultralytics tự chia GPU.
   batch_size: 32
-  epochs: 100                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
-  early_stopping_patience: 15   # early stopping (epoch)
+  epochs: 150                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
+  early_stopping_patience: 10   # early stopping (epoch)
   amp: true                     # mixed precision
   primary_metric: mAP50-95
   run_name: null                # tên run; null = lấy tên pipeline. Notebook tự sinh: {pipeline}_s{seed}_ep{epochs}_bs{batch}[_online]_{hash8}
@@ -61,6 +65,10 @@ project:                        # Tuỳ chọn: theo dõi thí nghiệm bằng W
   wandb_base_url: null          # TODO: null = wandb.ai; điền nếu nhóm dùng server riêng
   wandb_entity: null            # TODO: tên team/tài khoản W&B
   wandb_project: TSD-Voice-Alert
+
+split:
+  hash_size: 32
+  hamming_threshold: 150
 
 paths:
   raw_dir: data/raw
