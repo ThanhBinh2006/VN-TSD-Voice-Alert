@@ -68,7 +68,7 @@ project:                        # Tuỳ chọn: theo dõi thí nghiệm bằng W
 
 split:
   hash_size: 32
-  hamming_threshold: 150
+  hamming_threshold: 100
 
 paths:
   raw_dir: data/raw
