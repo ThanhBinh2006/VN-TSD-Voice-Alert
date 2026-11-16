@@ -20,7 +20,7 @@ train:
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
-  enabled: false
+  enabled: true
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
   # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
   mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation
@@ -41,22 +41,16 @@ sweep:                          # Không gian tìm kiếm siêu tham số (tuân
       max: 0.02
     train.optimizer:
       values: [SGD, AdamW]
-    # train.momentum:
-    #   distribution: uniform
-    #   min: 0.9
-    #   max: 0.937
-    # train.weight_decay:
-    #   distribution: log_uniform_values
-    #   min: 0.0001
-    #   max: 0.001
-    # train.warmup_epochs:
-    #   distribution: uniform
-    #   min: 1.0
-    #   max: 5.0
-    # online_preprocess.enabled:
-    #   values: [false, true]
-    # online_preprocess.occlusion_p:
-    #   values: [0.0, 0.3, 0.5]
-    # online_preprocess.occlusion_ratio:
-    #   values: [0.2, 0.3, 0.45]
+    train.momentum:
+      distribution: uniform
+      min: 0.9
+      max: 0.937
+    train.weight_decay:
+      distribution: log_uniform_values
+      min: 0.0001
+      max: 0.001
+    train.warmup_epochs:
+      distribution: uniform
+      min: 1.0
+      max: 5.0
 
