@@ -65,6 +65,7 @@ const state = {
   bufferAheadSec: 5.0,
   bufferMaxTimestamp: 0,
   isBuffering: false,
+  bufferSafetyTimer: null,
   targetPlayTime: 0,
   pendingAlerts: [], // { id, alert_id, track_id, spoken_text, timestamp_sec, position, audio_url, played }
   isScrubbing: false,
@@ -168,13 +169,29 @@ function svg(tag, attrs = {}, text) {
 /* ------------------------------------------------------------------ điều khiển đệm 5s */
 
 function setBufferingState(isBuffering, text) {
+  clearTimeout(state.bufferSafetyTimer);
+  state.bufferSafetyTimer = null;
   state.isBuffering = isBuffering;
+
   const notice = $("buffer-notice");
   const noticeText = $("buffer-text");
   if (!notice) return;
+
   if (isBuffering) {
     notice.hidden = false;
-    if (noticeText) noticeText.textContent = text || `Đang đệm ${state.bufferAheadSec}s dữ liệu video…`;
+    if (noticeText) noticeText.textContent = text || `Đang đệm dữ liệu video…`;
+
+    // Cơ chế an toàn (Safety fallback): sau tối đa 2.2 giây tự giải phóng spinner nếu trễ mạng hoặc tới cuối video
+    state.bufferSafetyTimer = setTimeout(() => {
+      if (state.isBuffering) {
+        state.isBuffering = false;
+        notice.hidden = true;
+        const video = $("result-video");
+        if (video && video.paused) {
+          video.play().catch(() => {});
+        }
+      }
+    }, 2200);
   } else {
     notice.hidden = true;
   }
@@ -183,9 +200,15 @@ function setBufferingState(isBuffering, text) {
 function checkBufferReady() {
   if (!state.isBuffering) return;
   const video = $("result-video");
+  const duration = (video && Number.isFinite(video.duration) && video.duration > 0)
+    ? video.duration
+    : (state.duration || 0);
   const curTime = state.targetPlayTime || (video ? video.currentTime : 0);
-  const isDone = state.job && state.job.status === "done";
-  const hasEnoughBuffer = state.bufferMaxTimestamp >= curTime + state.bufferAheadSec;
+  const targetBuffer = duration > 0
+    ? Math.min(duration, curTime + state.bufferAheadSec)
+    : (curTime + state.bufferAheadSec);
+  const isDone = (state.job && state.job.status === "done") || !state.eventsSource;
+  const hasEnoughBuffer = state.bufferMaxTimestamp >= targetBuffer - 0.25;
 
   if (hasEnoughBuffer || isDone) {
     setBufferingState(false);
@@ -1020,6 +1043,8 @@ function clearJobArtifacts() {
   resetVideoTrackState();
   state.interruptedAlertIds.clear();
   state.pendingAlerts = [];
+  clearTimeout(state.bufferSafetyTimer);
+  state.bufferSafetyTimer = null;
   setBufferingState(false);
 
   if (state.manualAudio) {
@@ -2269,7 +2294,10 @@ function seekTo(sec) {
   const video = $("result-video");
   if (!video) return;
 
-  const targetSec = Math.max(0, Math.min(sec, state.duration || 999999));
+  const duration = (video && Number.isFinite(video.duration) && video.duration > 0)
+    ? video.duration
+    : (state.duration || 999999);
+  const targetSec = Math.max(0, Math.min(sec, duration));
   interruptCurrentVideoAudio();
 
   video.currentTime = targetSec;
@@ -2291,13 +2319,18 @@ function seekTo(sec) {
     }
   }
 
-  // Kiểm tra bộ đệm 5s tại vị trí seek
-  const isJobDone = state.job && state.job.status === "done";
-  const hasBuffer = state.bufferMaxTimestamp >= targetSec + state.bufferAheadSec;
+  // Mốc đệm cần thiết: không vượt quá độ dài video, đệm vừa đủ ~2.0s để phát mượt ngay
+  const isJobDone = (state.job && state.job.status === "done") || !state.eventsSource;
+  const requiredBuffer = (duration > 0 && Number.isFinite(duration))
+    ? Math.min(duration, targetSec + Math.min(state.bufferAheadSec, 2.0))
+    : (targetSec + Math.min(state.bufferAheadSec, 2.0));
 
-  if (!isJobDone && !hasBuffer) {
+  // Nếu đoạn này đã được xử lý rồi (bufferMaxTimestamp đã vượt qua) hoặc job đã xong:
+  const alreadyBuffered = isJobDone || (state.bufferMaxTimestamp >= requiredBuffer - 0.25);
+
+  if (!alreadyBuffered) {
     video.pause();
-    setBufferingState(true, `Đang đệm ${state.bufferAheadSec}s từ ${formatTime(targetSec)}…`);
+    setBufferingState(true, `Đang đệm dữ liệu từ ${formatTime(targetSec)}…`);
     fetch(`/api/jobs/${state.jobId}/playback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
