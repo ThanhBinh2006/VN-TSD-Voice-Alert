@@ -22,4 +22,10 @@ Web UI (app/) ── upload ──► (chạy nền) ──► process_media
 Hai mô hình được nạp qua `ts_alert/pipelines/__init__.py` (`get_detector`) nên phần còn lại của hệ thống
 không phụ thuộc YOLO hay Faster R-CNN.
 
-TODO: bổ sung sơ đồ chính thức (draw.io / Mermaid) vào `docs/images/`.
+## Sơ đồ Thiết kế Chi tiết (UML & Mermaid)
+
+Hệ thống cung cấp đầy đủ 4 sơ đồ chuẩn tại [docs/SYSTEM_DIAGRAMS.md](SYSTEM_DIAGRAMS.md):
+- **Use Case Diagram**: Tương tác người dùng với hệ thống nhận diện và cảnh báo.
+- **Sequence Diagram**: Luồng khởi tạo đệm 5s, phát đồng bộ video/audio/box và luồng tua video (Seek).
+- **Activity Diagram**: Hoạt động song song giữa luồng phần cứng phía client và luồng suy luận/TTS phía server.
+- **Class Diagram**: Cấu trúc lớp hướng đối tượng (OOP) của cả Frontend và Backend.
