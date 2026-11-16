@@ -46,8 +46,8 @@ inference:
     backend: pytorch             # auto | pytorch | onnx | openvino
 
 realtime:
-  default_mode: realtime         # realtime | buffered
-  buffer_ahead_sec: 2.0
+  default_mode: buffered         # realtime | buffered
+  buffer_ahead_sec: 5.0
   step_fps_cap: 15.0
   video_playback_rate: 1.0       # Tốc độ phát video mặc định trên trình duyệt; phải > 0
   tts_timeout_sec: 3.0

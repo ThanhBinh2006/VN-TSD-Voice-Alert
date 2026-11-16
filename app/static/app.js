@@ -1,13 +1,15 @@
-/* Giao diện web TSD Voice Alert (Bản đồng bộ Frame + Voice Alert, không Camera, không CPU Preset, không MP4 Export).
+/* Giao diện web TSD Voice Alert (Bản đồng bộ mượt mà 30 FPS + Bộ đệm 5s + Đồng bộ tuyệt đối Giọng nói & Bounding Box).
    Phụ trách: Antigravity Flash
    JavaScript thuần, an toàn bộ nhớ & DOM, không thư viện bên ngoài.
    Hỗ trợ:
-     - Đồng bộ tuyệt đối giữa frame video và âm thanh cảnh báo (SSE: frame, alert, track_lost, telemetry, done)
-     - Nhận diện theo frame_stride tùy biến
-     - Canvas overlay nội suy theo vận tốc và bounding box
+     - Video HTML5 mượt mà (30/60 FPS) giải mã phần cứng Native
+     - Bounding box vẽ chính xác qua Canvas Overlay (OverlayCanvasRenderer)
+     - Bộ đệm 5 giây (buffer_ahead_sec = 5.0, mode = buffered) loại bỏ hiện tượng giật cục
+     - Đồng bộ tuyệt đối: Giọng nói và Bounding Box xuất hiện cùng 1 thời điểm khi video chạy đến biển báo
+     - Thanh kéo tua video (Scrubber) đồng bộ dải đường và đệm 5s khi tua
      - Tốc độ phát video linh hoạt (0.25× - 1.5×, mặc định 1.0×)
      - Tốc độ đọc giọng nói linh hoạt (1.0× - 1.8×, mặc định 1.4×) với preservesPitch
-     - Tự động ngắt/bỏ đọc khi đã đi qua biển báo (cutoff on pass)
+     - Tự động ngắt giọng nói khi xe đi qua biển báo (cutoff on pass)
      - Kế thừa luồng live stream /stream
    Các API chính trong app/main.py:
      GET /api/health, POST /api/jobs, GET /api/jobs, GET /api/jobs/<id>,
@@ -59,6 +61,14 @@ const state = {
   maxUploadMb: 200,
   defaultFrameStride: 30,
 
+  // Cơ chế đệm trước 5 giây
+  bufferAheadSec: 5.0,
+  bufferMaxTimestamp: 0,
+  isBuffering: false,
+  targetPlayTime: 0,
+  pendingAlerts: [], // { id, alert_id, track_id, spoken_text, timestamp_sec, position, audio_url, played }
+  isScrubbing: false,
+
   // Tốc độ phát video
   videoPlaybackRate: 1.0,
   userCustomVideoSpeed: false,
@@ -82,7 +92,7 @@ const state = {
   playbackSyncAbort: null,
   playbackSyncTimer: null,
   lastPlaybackSyncTime: 0,
-  activePlaybackMode: "realtime", // "realtime" | "buffered"
+  activePlaybackMode: "buffered", // "buffered" | "realtime"
 
   // Luồng âm thanh & caption
   liveAudioEnabled: true,
@@ -112,7 +122,7 @@ async function api(path, options) {
 }
 
 function formatTime(sec) {
-  if (!Number.isFinite(sec)) return "–";
+  if (!Number.isFinite(sec) || sec < 0) return "0:00";
   const m = Math.floor(sec / 60);
   const s = sec - m * 60;
   return `${m}:${s < 10 ? "0" : ""}${s.toFixed(1)}`;
@@ -152,6 +162,38 @@ function svg(tag, attrs = {}, text) {
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
   if (text != null) node.textContent = text;
   return node;
+}
+
+/* ------------------------------------------------------------------ điều khiển đệm 5s */
+
+function setBufferingState(isBuffering, text) {
+  state.isBuffering = isBuffering;
+  const notice = $("buffer-notice");
+  const noticeText = $("buffer-text");
+  if (!notice) return;
+  if (isBuffering) {
+    notice.hidden = false;
+    if (noticeText) noticeText.textContent = text || `Đang đệm ${state.bufferAheadSec}s dữ liệu video…`;
+  } else {
+    notice.hidden = true;
+  }
+}
+
+function checkBufferReady() {
+  if (!state.isBuffering) return;
+  const video = $("result-video");
+  const curTime = state.targetPlayTime || (video ? video.currentTime : 0);
+  const isDone = state.job && state.job.status === "done";
+  const hasEnoughBuffer = state.bufferMaxTimestamp >= curTime + state.bufferAheadSec;
+
+  if (hasEnoughBuffer || isDone) {
+    setBufferingState(false);
+    if (video && video.paused) {
+      video.play().catch((err) => {
+        console.warn("Autoplay video sau khi đệm bị chặn:", err);
+      });
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ điều khiển tốc độ phát video */
@@ -321,7 +363,7 @@ function applyAudioPlaybackRate(audio) {
 function isVideoTrackPassed(trackId, timestampSec, mediaTime, bestKf, visibleTrackIds) {
   if (!state.cutoffOnPass) return false;
 
-  // Nếu không có track_id (rất hiếm): fallback kiểm tra trôi quá 3.5s
+  // Nếu không có track_id: fallback kiểm tra trôi quá 3.5s
   if (trackId == null) {
     const video = $("result-video");
     return Boolean(video && !video.paused && (mediaTime - (timestampSec || 0) > 3.5));
@@ -650,8 +692,8 @@ class OverlayCanvasRenderer {
       }
     }
     this.keyframes.push(owned);
-    if (this.keyframes.length > 1200) {
-      this.keyframes = this.keyframes.slice(-800);
+    if (this.keyframes.length > 1500) {
+      this.keyframes = this.keyframes.slice(-1000);
     }
     this.keyframes.sort((a, b) => (a.source_timestamp || 0) - (b.source_timestamp || 0));
   }
@@ -862,6 +904,33 @@ class OverlayCanvasRenderer {
   }
 }
 
+/* ------------------------------------------------------------------ đồng bộ âm thanh & box theo mediaTime */
+
+function checkAndTriggerSynchronizedAlerts(mediaTime) {
+  if (!state.liveAudioEnabled && !state.cutoffOnPass) return;
+
+  for (let i = 0; i < state.pendingAlerts.length; i++) {
+    const item = state.pendingAlerts[i];
+    if (item.played) continue;
+
+    // Video đã đến hoặc vừa chạm mốc thời gian của biển báo (sai số trong khoảng -0.08s đến +0.40s)
+    const dt = mediaTime - item.timestamp_sec;
+    if (dt >= -0.08 && dt <= 0.40) {
+      item.played = true;
+
+      const isPassed = isVideoTrackPassed(item.track_id, item.timestamp_sec, mediaTime);
+      if (!isPassed && state.liveAudioEnabled) {
+        state.audioQueue.push(item);
+        playNextAudio();
+      }
+      showLiveCaption(item.spoken_text);
+    } else if (dt > 0.40) {
+      // Đã trôi qua mốc (ví dụ khi người dùng tua video nhảy cóc)
+      item.played = true;
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ giải phóng và dọn dẹp */
 
 function teardownOverlayRenderer() {
@@ -906,6 +975,8 @@ function clearJobArtifacts() {
   stopLiveAudio();
   resetVideoTrackState();
   state.interruptedAlertIds.clear();
+  state.pendingAlerts = [];
+  setBufferingState(false);
 
   if (state.manualAudio) {
     try {
@@ -920,11 +991,13 @@ function clearJobArtifacts() {
   state.liveCaptionUntil = 0;
 
   const video = $("result-video");
-  video.pause();
-  video.removeAttribute("src");
-  video.defaultPlaybackRate = 1.0;
-  video.playbackRate = 1.0;
-  video.load();
+  if (video) {
+    video.pause();
+    video.removeAttribute("src");
+    video.defaultPlaybackRate = 1.0;
+    video.playbackRate = 1.0;
+    video.load();
+  }
 
   const canvas = $("overlay-canvas");
   if (canvas) {
@@ -955,6 +1028,13 @@ function clearJobArtifacts() {
 
   const speedBar = $("video-speed-bar");
   if (speedBar) speedBar.hidden = true;
+
+  const scrubber = $("video-scrubber");
+  if (scrubber) scrubber.value = "0";
+  const curText = $("current-time-text");
+  if (curText) curText.textContent = "0:00";
+  const durText = $("duration-time-text");
+  if (durText) durText.textContent = "0:00";
 
   const playhead = $("road") ? $("road").querySelector(".playhead") : null;
   if (playhead) playhead.style.setProperty("--p", 0);
@@ -1105,6 +1185,9 @@ function setupUpload() {
       formData.set("frame_stride", strideInput.value.trim());
     }
     formData.set("playback_rate", String(state.videoPlaybackRate || 1.0));
+    formData.set("analysis_mode", "realtime_overlay");
+    formData.set("playback_mode", "buffered");
+    formData.set("buffer_ahead_sec", String(state.bufferAheadSec));
     uploadFile(formData);
   });
 }
@@ -1211,6 +1294,7 @@ function showJobView(jobId) {
     activeStreamJobId: null,
     seenAlertIds: new Set(),
     interruptedAlertIds: new Set(),
+    pendingAlerts: [],
     manualAudio: null,
   });
   resetVideoTrackState();
@@ -1295,11 +1379,14 @@ async function initJobWorkflow(jobId) {
   await startRealtimeVideoSession(job);
 }
 
-/* ------------------------------------------------------------------ luồng realtime video đồng bộ */
+/* ------------------------------------------------------------------ luồng realtime video mượt mà & đệm 5s */
 
 async function startRealtimeVideoSession(job) {
   state.job = job;
-  state.activePlaybackMode = job.playback_mode || "realtime";
+  state.activePlaybackMode = "buffered";
+  state.bufferMaxTimestamp = 0;
+  state.targetPlayTime = 0;
+  state.pendingAlerts = [];
   resetVideoTrackState();
 
   const jobTitle = $("job-title");
@@ -1324,18 +1411,21 @@ async function startRealtimeVideoSession(job) {
   const liveBar = $("live-bar");
 
   if (image) image.hidden = true;
-  if (video) video.hidden = true; // ưu tiên màn hình live frame trực tiếp
   if (liveImg) {
-    liveImg.hidden = false;
-    if (job.stream_url) {
-      liveImg.src = job.stream_url;
-      state.activeStreamJobId = job.id;
-    }
+    liveImg.hidden = true;
+    liveImg.removeAttribute("src");
   }
+
+  // Luôn hiển thị thẻ video và canvas để phát 30/60 FPS mượt mà
+  if (video) {
+    video.hidden = false;
+    video.pause();
+  }
+  if (canvas) canvas.hidden = false;
   if (liveBar) liveBar.hidden = false;
 
   const statusText = $("live-status-text");
-  if (statusText) statusText.textContent = "Đang nhận diện & phát âm thanh đồng bộ";
+  if (statusText) statusText.textContent = "Đang nhận diện & đệm video 5s mượt mà";
 
   const cancelBtn = $("cancel-job-btn");
   if (cancelBtn) cancelBtn.hidden = false;
@@ -1349,9 +1439,10 @@ async function startRealtimeVideoSession(job) {
   updateCutoffBtns(state.cutoffOnPass);
   updateSpeedSelects(state.voicePlaybackRate);
 
+  // Nạp source video HTML5
+  const sourceUrl = job.source_url || `/api/jobs/${job.id}/source`;
   if (video) {
     applyVideoPlaybackRate(video, state.videoPlaybackRate);
-    const sourceUrl = job.source_url || `/api/jobs/${job.id}/source`;
     if (video.getAttribute("src") !== sourceUrl) {
       video.src = sourceUrl;
       applyVideoPlaybackRate(video, state.videoPlaybackRate);
@@ -1359,6 +1450,7 @@ async function startRealtimeVideoSession(job) {
     }
   }
 
+  // Khởi tạo Canvas Overlay Renderer
   if (video && canvas && !state.overlayRenderer) {
     state.overlayRenderer = new OverlayCanvasRenderer(video, canvas, {
       isLive: false,
@@ -1374,14 +1466,33 @@ async function startRealtimeVideoSession(job) {
           }
         }
         pruneAndInterruptVideoAudio(mediaTime);
+
+        // ĐỒNG BỘ TUYỆT ĐỐI GIỌNG NÓI VÀ BOUNDING BOX
+        checkAndTriggerSynchronizedAlerts(mediaTime);
       },
     });
     state.overlayRenderer.start();
   }
 
+  // Bắt đầu trạng thái đệm 5s ban đầu
+  setBufferingState(true, `Đang đệm ${state.bufferAheadSec}s dữ liệu video…`);
+
   if (video) {
     setupPlaybackSync(job.id, video);
   }
+
+  // Gửi thông báo bắt đầu đệm 5s tới backend
+  fetch(`/api/jobs/${job.id}/playback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      timestamp_sec: 0,
+      seeked: true,
+      buffer_ahead_sec: state.bufferAheadSec,
+      mode: "buffered",
+      playback_rate: state.videoPlaybackRate || 1.0,
+    }),
+  }).catch(() => {});
 
   const eventsUrl = job.events_url || `/api/jobs/${job.id}/events`;
   teardownEventSource();
@@ -1389,11 +1500,15 @@ async function startRealtimeVideoSession(job) {
   const es = new EventSource(eventsUrl);
   state.eventsSource = es;
 
-  // Lắng nghe sự kiện FRAME đồng bộ (ảnh + cảnh báo âm thanh của frame đó)
+  // Lắng nghe sự kiện FRAME
   es.addEventListener("frame", (e) => {
     try {
       const frameData = JSON.parse(e.data);
       handleSSEFrame(frameData);
+      if (frameData.timestamp_sec != null) {
+        state.bufferMaxTimestamp = Math.max(state.bufferMaxTimestamp, frameData.timestamp_sec);
+      }
+      checkBufferReady();
     } catch (_) { }
   });
 
@@ -1410,6 +1525,10 @@ async function startRealtimeVideoSession(job) {
       if (state.overlayRenderer) {
         state.overlayRenderer.addKeyframe(overlayData);
       }
+      if (overlayData.source_timestamp != null) {
+        state.bufferMaxTimestamp = Math.max(state.bufferMaxTimestamp, overlayData.source_timestamp);
+      }
+      checkBufferReady();
     } catch (_) { }
   });
 
@@ -1417,6 +1536,9 @@ async function startRealtimeVideoSession(job) {
     try {
       const alertData = JSON.parse(e.data);
       handleSSEAlert(alertData);
+      const ts = alertData.source_timestamp != null ? alertData.source_timestamp : (alertData.timestamp_sec || 0);
+      state.bufferMaxTimestamp = Math.max(state.bufferMaxTimestamp, ts);
+      checkBufferReady();
     } catch (_) { }
   });
 
@@ -1444,6 +1566,8 @@ async function startRealtimeVideoSession(job) {
   });
 
   es.addEventListener("done", () => {
+    setBufferingState(false);
+    checkBufferReady();
     teardownEventSource();
     api(`/api/jobs/${job.id}`).then((latest) => {
       renderRealtimeDone(latest);
@@ -1468,17 +1592,6 @@ async function startRealtimeVideoSession(job) {
 
 function handleSSEFrame(frame) {
   if (!frame) return;
-  const liveImg = $("live-stream");
-  const video = $("result-video");
-
-  // Hiển thị frame ảnh trực tiếp từ backend
-  if (frame.image) {
-    if (video) video.hidden = true;
-    if (liveImg) {
-      liveImg.hidden = false;
-      liveImg.src = frame.image;
-    }
-  }
 
   // Cập nhật tiến trình
   if (frame.progress_pct != null) {
@@ -1499,7 +1612,7 @@ function handleSSEFrame(frame) {
     liveDetail.textContent = parts.join(" · ");
   }
 
-  // ĐỒNG BỘ TUYỆT ĐỐI: Frame render đến đâu thì âm thanh cảnh báo của frame đó phát ra NGAY LẬP TỨC
+  // Nạp voice_alerts vào pendingAlerts để phát đồng thời khi video chạy tới
   if (Array.isArray(frame.voice_alerts) && frame.voice_alerts.length > 0) {
     for (const alert of frame.voice_alerts) {
       handleSSEAlert({
@@ -1519,6 +1632,8 @@ function handleSSEStatus(jobId, data) {
   const status = p.status || "processing";
 
   if (status === "done") {
+    setBufferingState(false);
+    checkBufferReady();
     teardownEventSource();
     api(`/api/jobs/${jobId}`).then((latest) => {
       renderRealtimeDone(latest);
@@ -1527,6 +1642,7 @@ function handleSSEStatus(jobId, data) {
   }
 
   if (status === "failed" || status === "cancelled" || status === "stopped") {
+    setBufferingState(false);
     teardownEventSource();
     api(`/api/jobs/${jobId}`).then((latest) => {
       renderFailed(latest);
@@ -1566,23 +1682,16 @@ function handleSSEAlert(ev) {
     timestamp_sec: ev.source_timestamp != null ? ev.source_timestamp : (ev.timestamp_sec || 0),
     position: ev.position || "front",
     audio_url: ev.audio_url,
+    played: false,
   };
 
-  // LUÔN LUÔN lưu lại sự kiện vào state.events để hiện trên timeline và dải đường
+  // Lưu lại sự kiện vào state.events để hiện trên timeline và dải đường
   state.events.push(eventObj);
   state.events.sort((a, b) => a.timestamp_sec - b.timestamp_sec);
 
-  // ĐỒNG BỘ TUYỆT ĐỐI: Frame render đến đâu thì âm thanh cảnh báo của frame đó phát ra NGAY LẬP TỨC
-  const video = $("result-video");
-  const curTime = (video && !video.hidden) ? (video.currentTime || 0) : (eventObj.timestamp_sec || 0);
-  const isPassed = (ev.track_lost === true && ev.track_id == null) || isVideoTrackPassed(eventObj.track_id, eventObj.timestamp_sec, curTime);
+  // Lưu vào pendingAlerts để phát ĐỒNG THỜI với Bounding Box khi video chạy tới timestamp_sec
+  state.pendingAlerts.push(eventObj);
 
-  if (!isPassed && state.liveAudioEnabled) {
-    state.audioQueue.push(eventObj);
-    playNextAudio();
-  }
-
-  showLiveCaption(eventObj.spoken_text);
   renderEvents(true);
   drawMarkers();
   renderInsights();
@@ -1633,6 +1742,8 @@ function setupPlaybackSync(jobId, video) {
       timestamp_sec: video.currentTime || 0,
       playing: !video.paused,
       playback_rate: video.playbackRate || 1.0,
+      mode: "buffered",
+      buffer_ahead_sec: state.bufferAheadSec,
       ...opts,
     };
 
@@ -1653,19 +1764,10 @@ function setupPlaybackSync(jobId, video) {
 
   const onPlay = () => sendSync({ playing: true });
   const onPause = () => sendSync({ playing: false });
-  const onSeeked = () => {
-    state.interruptedAlertIds.clear();
-    if (state.overlayRenderer) {
-      state.overlayRenderer.setGeneration(state.overlayRenderer.generation + 1);
-    }
-    resetVideoTrackState();
-    sendSync({ seeked: true });
-  };
   const onRateChange = () => sendSync({ playback_rate: video.playbackRate || 1.0 });
 
   video.addEventListener("play", onPlay, { signal });
   video.addEventListener("pause", onPause, { signal });
-  video.addEventListener("seeked", onSeeked, { signal });
   video.addEventListener("ratechange", onRateChange, { signal });
 
   state.playbackSyncTimer = setInterval(() => {
@@ -1701,6 +1803,7 @@ function setupPlaybackSync(jobId, video) {
 
 async function renderRealtimeDone(job) {
   state.job = job;
+  setBufferingState(false);
   teardownEventSource();
   teardownLiveStream();
   stopLiveAudio();
@@ -1738,6 +1841,7 @@ async function renderRealtimeDone(job) {
 
   if (image) image.hidden = true;
   if (video) video.hidden = false;
+  if (canvas) canvas.hidden = false;
 
   if (downloadLink) {
     if (job.download_url && job.result_url) {
@@ -1983,6 +2087,7 @@ async function renderLegacyLiveProgress(job) {
 function renderFailed(job) {
   state.pollInFlight = false;
   stopPolling();
+  setBufferingState(false);
   teardownEventSource();
   teardownOverlayRenderer();
   teardownLiveStream();
@@ -2001,6 +2106,7 @@ async function renderResult(job) {
   clearTimeout(state.captionTimer);
   state.captionTimer = null;
   state.liveCaptionUntil = 0;
+  setBufferingState(false);
   teardownLiveStream();
   stopLiveAudio();
   teardownOverlayRenderer();
@@ -2089,12 +2195,71 @@ function renderHud(job) {
   if (hud) hud.replaceChildren(...items);
 }
 
+function updateScrubberUI(curSec) {
+  const scrubber = $("video-scrubber");
+  const curText = $("current-time-text");
+  const durText = $("duration-time-text");
+  const duration = state.duration || 0;
+
+  if (curText) curText.textContent = formatTime(curSec);
+  if (durText && duration > 0) durText.textContent = formatTime(duration);
+
+  if (scrubber && !state.isScrubbing && duration > 0) {
+    const pct = Math.min(100, Math.max(0, (curSec / duration) * 100));
+    scrubber.value = pct.toFixed(1);
+  }
+}
+
 function seekTo(sec) {
-  if (state.activeStreamJobId) return;
   const video = $("result-video");
-  if (!video || !video.src) return;
-  video.currentTime = Math.max(0, sec - 0.3);
-  video.play().catch(() => { });
+  if (!video) return;
+
+  const targetSec = Math.max(0, Math.min(sec, state.duration || 999999));
+  interruptCurrentVideoAudio();
+
+  video.currentTime = targetSec;
+  state.targetPlayTime = targetSec;
+
+  if (state.overlayRenderer) {
+    state.overlayRenderer.setGeneration(state.overlayRenderer.generation + 1);
+  }
+  resetVideoTrackState();
+
+  // Khôi phục lại danh sách pendingAlerts từ thời điểm seek
+  state.pendingAlerts = [];
+  for (const ev of state.events) {
+    if (ev.timestamp_sec >= targetSec - 0.05) {
+      ev.played = false;
+      state.pendingAlerts.push(ev);
+    } else {
+      ev.played = true;
+    }
+  }
+
+  // Kiểm tra bộ đệm 5s tại vị trí seek
+  const isJobDone = state.job && state.job.status === "done";
+  const hasBuffer = state.bufferMaxTimestamp >= targetSec + state.bufferAheadSec;
+
+  if (!isJobDone && !hasBuffer) {
+    video.pause();
+    setBufferingState(true, `Đang đệm ${state.bufferAheadSec}s từ ${formatTime(targetSec)}…`);
+    fetch(`/api/jobs/${state.jobId}/playback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        timestamp_sec: targetSec,
+        seeked: true,
+        buffer_ahead_sec: state.bufferAheadSec,
+        mode: "buffered",
+        playback_rate: video.playbackRate || 1.0,
+      }),
+    }).catch(() => {});
+  } else {
+    setBufferingState(false);
+    video.play().catch(() => {});
+  }
+
+  updateScrubberUI(targetSec);
 }
 
 function renderEvents(isVideo) {
@@ -2175,6 +2340,8 @@ function drawMarkers() {
   state.duration = duration;
   const roadEnd = $("road-end");
   if (roadEnd) roadEnd.textContent = formatTime(duration);
+  const durText = $("duration-time-text");
+  if (durText) durText.textContent = formatTime(duration);
 
   state.events.forEach((ev, i) => {
     const lane = road.querySelector(`.lane[data-lane="${laneOf(ev)}"]`);
@@ -2368,6 +2535,7 @@ function setupPlayer() {
       if (state.overlayRenderer) {
         state.overlayRenderer.updateDimensions();
       }
+      updateScrubberUI(video.currentTime || 0);
     });
 
     video.addEventListener("ratechange", () => {
@@ -2386,6 +2554,7 @@ function setupPlayer() {
         if (playhead) playhead.style.setProperty("--p", Math.min(1, t / state.duration));
       }
 
+      updateScrubberUI(t);
       pruneAndInterruptVideoAudio(t);
 
       let current = -1;
@@ -2426,6 +2595,25 @@ function setupPlayer() {
       if (eventsEl) {
         eventsEl.querySelectorAll("li").forEach((r) => r.classList.toggle("active", Number(r.dataset.index) === current));
       }
+    });
+  }
+
+  // Thanh kéo Scrubber
+  const scrubber = $("video-scrubber");
+  if (scrubber) {
+    scrubber.addEventListener("input", () => {
+      state.isScrubbing = true;
+      const duration = state.duration || 0;
+      const curSec = (parseFloat(scrubber.value) / 100) * duration;
+      const curText = $("current-time-text");
+      if (curText) curText.textContent = formatTime(curSec);
+    });
+
+    scrubber.addEventListener("change", () => {
+      state.isScrubbing = false;
+      const duration = state.duration || 0;
+      const targetSec = (parseFloat(scrubber.value) / 100) * duration;
+      seekTo(targetSec);
     });
   }
 
