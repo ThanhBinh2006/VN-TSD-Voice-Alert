@@ -536,6 +536,50 @@ a {
   font-size: .8125rem;
 }
 
+.sub-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--stage-ink);
+  font-size: .8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  margin-top: 2px;
+}
+
+.sub-checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--stage);
+  border: 1px solid var(--stage-line);
+  cursor: pointer;
+  outline: none;
+  display: grid;
+  place-content: center;
+  transition: all .15s ease;
+}
+
+.sub-checkbox input[type="checkbox"]:hover {
+  border-color: var(--amber);
+}
+
+.sub-checkbox input[type="checkbox"]:checked {
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+.sub-checkbox input[type="checkbox"]:checked::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  background-color: #000;
+}
+
 .styled-select {
   padding: 6px 12px;
   background: var(--stage);
@@ -984,6 +1028,42 @@ a {
   cursor: pointer;
   border: none;
   box-shadow: 0 0 8px rgba(56, 189, 248, .6);
+}
+
+.video-mute-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 6px;
+  color: var(--stage-ink);
+  font: 500 .75rem var(--font);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s ease;
+}
+
+.video-mute-btn:hover {
+  background: rgba(255, 255, 255, .16);
+  border-color: rgba(255, 255, 255, .28);
+}
+
+.video-mute-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--amber);
+}
+
+.video-mute-btn.muted {
+  background: rgba(239, 68, 68, .18);
+  border-color: rgba(239, 68, 68, .4);
+  color: #fca5a5;
+}
+
+.video-mute-btn .audio-icon {
+  width: 13px;
+  height: 13px;
 }
 
 /* ------------------------------------------------------------ thanh chỉnh tốc độ phát video */

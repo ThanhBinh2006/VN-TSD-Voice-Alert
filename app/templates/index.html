@@ -83,6 +83,12 @@
                   <option value="1.5">1.5×</option>
                 </select>
               </div>
+              <div class="sub-row">
+                <label class="sub-checkbox" for="video-mute-default" title="Tắt âm thanh nền của video clip để chỉ nghe giọng cảnh báo">
+                  <input type="checkbox" id="video-mute-default" name="mute_video">
+                  <span>Tắt âm video gốc (chỉ nghe giọng cảnh báo)</span>
+                </label>
+              </div>
             </div>
 
             <!-- Cấu hình frame stride: nhận diện & đọc đồng bộ -->
@@ -169,6 +175,15 @@
               <span id="current-time-text" class="time-text num">0:00</span>
               <input type="range" id="video-scrubber" class="video-scrubber" min="0" max="100" step="0.1" value="0" aria-label="Tua video">
               <span id="duration-time-text" class="time-text num">0:00</span>
+              <button type="button" id="video-mute-btn" class="video-mute-btn" aria-pressed="false" title="Bật/Tắt âm thanh của video gốc">
+                <svg class="audio-icon on" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <path d="M11.536 14.01A8.47 8.47 0 0 0 14.026 8a8.47 8.47 0 0 0-2.49-6.01l-.708.707A7.48 7.48 0 0 1 13.025 8c0 2.071-.84 3.946-2.197 5.303zm-1.66-1.66A6.08 6.08 0 0 0 11.536 8a6.08 6.08 0 0 0-1.66-4.35l-.707.707A5.09 5.09 0 0 1 10.536 8a5.09 5.09 0 0 1-1.367 3.643zM6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06z" />
+                </svg>
+                <svg class="audio-icon off" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden>
+                  <path d="M6.717 3.55A.5.5 0 0 1 7 4v8a.5.5 0 0 1-.812.39L3.825 10.5H1.5A.5.5 0 0 1 1 10V6a.5.5 0 0 1 .5-.5h2.325l2.363-1.89a.5.5 0 0 1 .529-.06zm7.137 1.596a.5.5 0 0 1 0 .708L12.707 7l1.147 1.146a.5.5 0 0 1-.708.708L12 7.707l-1.146 1.147a.5.5 0 0 1-.708-.708L11.293 7l-1.147-1.146a.5.5 0 0 1 .708-.708L12 6.293l1.146-1.147a.5.5 0 0 1 .708 0z" />
+                </svg>
+                <span id="video-mute-label">Âm video</span>
+              </button>
             </div>
 
             <!-- Thanh chỉnh tốc độ phát video (hoạt động cả realtime & xem lại) -->
@@ -200,6 +215,10 @@
                   <button id="live-cutoff-btn" class="live-action-btn active" type="button" aria-pressed="true"
                     title="Tự ngắt giọng nói ngay khi xe đã đi qua biển báo">
                     <span>Qua biển: Tự ngắt</span>
+                  </button>
+                  <button id="live-video-mute-btn" class="live-action-btn" type="button" aria-pressed="false"
+                    title="Bật/Tắt âm thanh nền của video gốc">
+                    <span>Âm video: Bật</span>
                   </button>
                   <label for="live-speed-select" class="speed-select-wrap" title="Tốc độ đọc giọng nói">
                     <span class="speed-label">Giọng nói:</span>

@@ -69,9 +69,10 @@ const state = {
   pendingAlerts: [], // { id, alert_id, track_id, spoken_text, timestamp_sec, position, audio_url, played }
   isScrubbing: false,
 
-  // Tốc độ phát video
+  // Tốc độ phát video & âm thanh video gốc
   videoPlaybackRate: 1.0,
   userCustomVideoSpeed: false,
+  videoMuted: false,
 
   // Tốc độ giọng nói và chế độ ngắt khi qua biển
   voicePlaybackRate: 1.4,
@@ -196,7 +197,50 @@ function checkBufferReady() {
   }
 }
 
-/* ------------------------------------------------------------------ điều khiển tốc độ phát video */
+/* ------------------------------------------------------------------ điều khiển tốc độ phát video & âm thanh video */
+
+function setVideoMuted(muted) {
+  state.videoMuted = Boolean(muted);
+  const video = $("result-video");
+  if (video && video.muted !== state.videoMuted) {
+    video.muted = state.videoMuted;
+  }
+
+  const btn = $("video-mute-btn");
+  if (btn) {
+    btn.setAttribute("aria-pressed", state.videoMuted ? "true" : "false");
+    btn.classList.toggle("muted", state.videoMuted);
+    const iconOn = btn.querySelector(".audio-icon.on");
+    const iconOff = btn.querySelector(".audio-icon.off");
+    if (iconOn && iconOff) {
+      iconOn.hidden = state.videoMuted;
+      iconOff.hidden = !state.videoMuted;
+    }
+    const label = $("video-mute-label");
+    if (label) {
+      label.textContent = state.videoMuted ? "Âm video: Tắt" : "Âm video";
+    }
+  }
+
+  const liveBtn = $("live-video-mute-btn");
+  if (liveBtn) {
+    liveBtn.setAttribute("aria-pressed", state.videoMuted ? "true" : "false");
+    liveBtn.classList.toggle("muted", state.videoMuted);
+    const span = liveBtn.querySelector("span");
+    if (span) {
+      span.textContent = state.videoMuted ? "Âm video: Tắt" : "Âm video: Bật";
+    }
+  }
+
+  const muteCheck = $("video-mute-default");
+  if (muteCheck && muteCheck.checked !== state.videoMuted) {
+    muteCheck.checked = state.videoMuted;
+  }
+}
+
+function toggleVideoMuted() {
+  setVideoMuted(!state.videoMuted);
+}
 
 function applyVideoPlaybackRate(videoEl, rate = state.videoPlaybackRate) {
   if (!videoEl) return;
@@ -1038,6 +1082,9 @@ function clearJobArtifacts() {
 
   const playhead = $("road") ? $("road").querySelector(".playhead") : null;
   if (playhead) playhead.style.setProperty("--p", 0);
+
+  const muteCheck = $("video-mute-default");
+  setVideoMuted(muteCheck ? muteCheck.checked : false);
 }
 
 /* ------------------------------------------------------------------ trạng thái server */
@@ -1177,6 +1224,11 @@ function setupUpload() {
         state.videoPlaybackRate = chosenRate;
         state.userCustomVideoSpeed = true;
       }
+    }
+
+    const muteCheck = $("video-mute-default");
+    if (muteCheck) {
+      state.videoMuted = Boolean(muteCheck.checked);
     }
 
     unlockAudio();
@@ -1448,6 +1500,7 @@ async function startRealtimeVideoSession(job) {
       applyVideoPlaybackRate(video, state.videoPlaybackRate);
       video.load();
     }
+    setVideoMuted(state.videoMuted);
   }
 
   // Khởi tạo Canvas Overlay Renderer
@@ -1869,6 +1922,7 @@ async function renderRealtimeDone(job) {
   const targetRate = state.videoPlaybackRate || Number(job.playback_rate) || 1.0;
   if (video) applyVideoPlaybackRate(video, targetRate);
   updateVideoSpeedButtons(targetRate);
+  setVideoMuted(state.videoMuted);
   syncVideoSpeedBarVisibility();
 
   renderHud(job);
@@ -2154,6 +2208,7 @@ async function renderResult(job) {
     const targetRate = state.videoPlaybackRate || Number(job.playback_rate) || 1.0;
     applyVideoPlaybackRate(video, targetRate);
     updateVideoSpeedButtons(targetRate);
+    setVideoMuted(state.videoMuted);
   } else if (image) {
     if (video) video.removeAttribute("src");
     image.src = `${job.result_url}?t=${Date.now()}`;
@@ -2536,6 +2591,13 @@ function setupPlayer() {
         state.overlayRenderer.updateDimensions();
       }
       updateScrubberUI(video.currentTime || 0);
+      setVideoMuted(state.videoMuted);
+    });
+
+    video.addEventListener("volumechange", () => {
+      if (video.muted !== state.videoMuted) {
+        setVideoMuted(video.muted);
+      }
     });
 
     video.addEventListener("ratechange", () => {
@@ -2630,6 +2692,16 @@ function setupPlayer() {
   const liveAudioBtn = $("live-audio-btn");
   if (liveAudioBtn) {
     liveAudioBtn.addEventListener("click", toggleLiveAudio);
+  }
+
+  const videoMuteBtn = $("video-mute-btn");
+  if (videoMuteBtn) {
+    videoMuteBtn.addEventListener("click", toggleVideoMuted);
+  }
+
+  const liveVideoMuteBtn = $("live-video-mute-btn");
+  if (liveVideoMuteBtn) {
+    liveVideoMuteBtn.addEventListener("click", toggleVideoMuted);
   }
 
   const liveCutoffBtn = $("live-cutoff-btn");
