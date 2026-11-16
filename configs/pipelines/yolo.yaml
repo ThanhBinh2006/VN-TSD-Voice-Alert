@@ -20,7 +20,7 @@ train:
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
 online_preprocess:
-  enabled: true
+  enabled: false
   hflip: false                  # Biển báo giao thông có tính định hướng, mặc định tắt lật ngang
   # Data augmentation hyperparameters (chỉ áp dụng khi enabled: true)
   mosaic: 1.0                   # Xác suất sử dụng Mosaic augmentation

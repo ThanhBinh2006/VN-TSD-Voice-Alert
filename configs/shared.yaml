@@ -22,7 +22,7 @@ train:
   # TỔNG batch trên tất cả GPU. Faster R-CNN (DDP) phải chia bằng ts_alert.runtime.batch.per_rank_batch;
   # YOLO truyền nguyên tổng để Ultralytics tự chia GPU.
   batch_size: 32
-  epochs: 150                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
+  epochs: 100                    # Thống nhất số epoch mặc định cho cả hai mô hình (chỉnh theo thực nghiệm hoặc override)
   early_stopping_patience: 10   # early stopping (epoch)
   amp: true                     # mixed precision
   primary_metric: mAP50-95

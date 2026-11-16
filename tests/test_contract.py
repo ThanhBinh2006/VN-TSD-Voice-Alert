@@ -1,3 +1,4 @@
+import copy
 from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
@@ -95,7 +96,9 @@ def test_online_transforms_yolo():
     cfg = resolve_config("yolo", "local")
 
     # Khi enabled = False
-    args_disabled = build_online_transforms(cfg, "ultralytics")
+    cfg_disabled = copy.deepcopy(cfg)
+    cfg_disabled.setdefault("online_preprocess", {})["enabled"] = False
+    args_disabled = build_online_transforms(cfg_disabled, "ultralytics")
     assert args_disabled["mosaic"] == 0.0
     assert args_disabled["mixup"] == 0.0
     assert args_disabled["fliplr"] == 0.0

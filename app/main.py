@@ -44,7 +44,7 @@ from ts_alert.types import IMAGE_EXTS, MODEL_NAMES, VIDEO_EXTS
 log = logging.getLogger(__name__)
 
 _ANALYSIS_MODES = frozenset(
-    {"legacy", "realtime_overlay", "realtime", "buffered"}
+    {"legacy", "realtime_overlay", "realtime", "buffered", "sync", "synchronized"}
 )
 _PLAYBACK_MODES = frozenset({"realtime", "buffered"})
 _BACKENDS = frozenset({"auto", "pytorch", "onnx", "openvino"})
@@ -163,6 +163,27 @@ def create_app(
         finally:
             runner.shutdown(wait=False)
 
+    from ts_alert.runtime.synchronized_processor import (
+        SynchronizedJobManager,
+        SynchronizedPipeline,
+    )
+    from ts_alert.utils.io import load_classes
+
+    sync_manager = SynchronizedJobManager()
+
+    def create_sync_pipeline(model_name: str) -> SynchronizedPipeline:
+        detector = runner.get_detector(model_name)
+        cfg = cfg_for(model_name)
+        classes_path = resolve_path(cfg["data"]["classes_file"])
+        classes = load_classes(classes_path) if classes_path.is_file() else {}
+        return SynchronizedPipeline(
+            detector=detector,
+            cfg=cfg,
+            classes=classes,
+            store=store,
+            audio_dir=outputs_dir / "audio",
+        )
+
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = (
         int(base_cfg["app"]["max_upload_mb"]) * 1024 * 1024
@@ -172,6 +193,8 @@ def create_app(
         "store": store,
         "runner": runner,
         "realtime": realtime,
+        "sync_manager": sync_manager,
+        "create_sync_pipeline": create_sync_pipeline,
         "cfg": base_cfg,
         "cfg_for": cfg_for,
         "fake": fake,
@@ -761,6 +784,30 @@ def _register_routes(app: Flask) -> None:
             ctx["job_options"][job_id] = options
 
         session: dict[str, Any] | None = None
+        if input_type == "video" and analysis_mode in ("sync", "synchronized"):
+            pipeline = ctx["create_sync_pipeline"](model_name)
+            ctx["sync_manager"].create_session(
+                job_id=job_id,
+                video_path=saved,
+                frame_stride=stride_val,
+                pipeline=pipeline,
+            )
+            ctx["runner"].progress.start_processing(
+                job_id, frame_count=None, frame_stride=stride_val
+            )
+            job = _job_or_404(job_id)
+            data: dict[str, Any] = {
+                "job_id": job_id,
+                "status": "processing",
+                "status_url": url_for("get_job", job_id=job_id),
+                "events_url": url_for("job_events", job_id=job_id),
+                "frame_stride": stride_val,
+                "analysis_mode": "sync",
+            }
+            response = jsonify(data)
+            response.status_code = 202
+            return response
+
         use_realtime = input_type == "video" and analysis_mode != "legacy"
         if use_realtime:
             try:
@@ -953,6 +1000,15 @@ def _register_routes(app: Flask) -> None:
     @app.get("/api/jobs/<int:job_id>/events")
     def job_events(job_id: int) -> Response:
         """Phát các sự kiện SSE của phiên phân tích video."""
+        sync_mgr = _ctx().get("sync_manager")
+        if sync_mgr is not None:
+            sync_session = sync_mgr.get_session(job_id)
+            if sync_session is not None:
+                return Response(
+                    stream_with_context(sync_session.iter_sse()),
+                    mimetype="text/event-stream",
+                    headers=dict(_SSE_HEADERS),
+                )
         _video_session_or_404(job_id)
         return _sse_response("video", job_id)
 
@@ -1017,11 +1073,14 @@ def _register_routes(app: Flask) -> None:
 
     @app.post("/api/jobs/<int:job_id>/cancel")
     def job_cancel(job_id: int) -> Response:
-        """Hủy phiên realtime hoặc job legacy tương ứng."""
+        """Hủy phiên realtime, sync session hoặc job legacy tương ứng."""
         ctx = _ctx()
         with ctx["job_lock"]:
             _job_or_404(job_id)
-            if ctx["realtime"].has_video_session(job_id):
+            sync_mgr = ctx.get("sync_manager")
+            if sync_mgr is not None and sync_mgr.get_session(job_id) is not None:
+                cancelled = sync_mgr.cancel_session(job_id)
+            elif ctx["realtime"].has_video_session(job_id):
                 cancelled = ctx["realtime"].cancel_video_session(job_id)
             else:
                 cancelled = ctx["runner"].cancel(job_id)
