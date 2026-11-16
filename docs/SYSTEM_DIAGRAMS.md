@@ -10,6 +10,10 @@ Tài liệu này mô tả chi tiết thiết kế kiến trúc của hệ thốn
 
 ## 1. Use Case Diagram (Sơ đồ ca sử dụng)
 
+![Use Case Diagram](diagrams/01_use_case_diagram.png)
+
+*Hình 1: Sơ đồ ca sử dụng của hệ thống TSD Voice Alert Web Demo.*
+
 Mô tả các tương tác chính giữa **Người dùng (Người lái xe / Người vận hành)** và **Hệ thống TSD Voice Alert Web Demo**.
 
 ```mermaid
@@ -53,6 +57,10 @@ flowchart LR
 ## 2. Sequence Diagram (Sơ đồ tuần tự)
 
 ### 2.1. Luồng Khởi tạo Job, Đệm trước 5s & Phát đồng bộ
+
+![Sequence Diagram - Initial Buffering](diagrams/02_sequence_initial_buffering.png)
+
+*Hình 2.1: Sơ đồ tuần tự quá trình khởi tạo job, đệm trước 5s và phát đồng bộ.*
 
 Mô tả chuỗi tương tác từ lúc người dùng tải video lên, hệ thống tự động đệm trước 5 giây dữ liệu trong nền, và phát đồng thời Bounding Box + Giọng nói khi video chạy tới từng biển báo.
 
@@ -108,6 +116,10 @@ sequenceDiagram
 
 ### 2.2. Luồng Kéo Tua Video & Đệm 5s tại vị trí mới (Seek Flow)
 
+![Sequence Diagram - Seek Flow](diagrams/03_sequence_seek_flow.png)
+
+*Hình 2.2: Sơ đồ tuần tự cơ chế kéo tua video và nạp đệm trước 5s từ vị trí mới.*
+
 Mô tả cơ chế khi người dùng kéo thanh Scrubber hoặc nhấp vào dải đường `#road` để tua video.
 
 ```mermaid
@@ -150,6 +162,10 @@ sequenceDiagram
 
 ## 3. Activity Diagram (Sơ đồ hoạt động luồng xử lý)
 
+![Activity Diagram](diagrams/04_activity_diagram.png)
+
+*Hình 3: Sơ đồ hoạt động luồng xử lý song song giữa Client và Server.*
+
 Mô tả dòng chảy hoạt động song song giữa luồng giao diện người dùng (Frontend Hardware Playback) và luồng suy luận đệm dữ liệu (Backend Inference & TTS Buffering).
 
 ```mermaid
@@ -162,11 +178,11 @@ flowchart TD
     ForkParallel -->|Luồng Backend| ReadClock[Lấy mốc playhead hiện tại]
     ReadClock --> ReadFrame[Đọc frame tiếp theo theo frame_stride]
     ReadFrame --> CheckAhead{Khoảng cách tới playhead?}
-    CheckAhead -->|> 5.0s| WaitAhead[Tạm dừng chờ video phát tới - wait_ahead]
+    CheckAhead -->|"Vượt trước playhead > 5.0s"| WaitAhead[Tạm dừng chờ video phát tới - wait_ahead]
     WaitAhead --> ReadClock
-    CheckAhead -->|< 0s trễ quá 1.5s| SkipBehind[Nhảy cóc bắt kịp playhead - skip_behind]
+    CheckAhead -->|"Trễ hơn playhead quá 1.5s"| SkipBehind[Nhảy cóc bắt kịp playhead - skip_behind]
     SkipBehind --> ReadClock
-    CheckAhead -->|Trong khoảng [0s, 5s]| RunModel[Chạy suy luận YOLO / Faster R-CNN]
+    CheckAhead -->|"Trong khoảng 0s đến 5s"| RunModel[Chạy suy luận YOLO / Faster R-CNN]
 
     RunModel --> CalcPos[Xác định vị trí làn đường: Trái / Trước / Phải]
     CalcPos --> TrackDedup[Theo dõi đối tượng & Chống lặp cảnh báo]
@@ -206,6 +222,10 @@ flowchart TD
 ---
 
 ## 4. Class Diagram (Sơ đồ lớp kiến trúc)
+
+![Class Diagram](diagrams/05_class_diagram.png)
+
+*Hình 4: Sơ đồ lớp kiến trúc hướng đối tượng Frontend & Backend.*
 
 Mô tả cấu trúc lớp hướng đối tượng (OOP) của cả tầng Frontend (JavaScript) và tầng Backend (Python).
 
