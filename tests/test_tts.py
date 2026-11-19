@@ -515,7 +515,7 @@ def test_shared_yaml_tts_and_realtime_defaults(
     assert tts_cfg["cache_enabled"] is True
 
     realtime_cfg = shared_cfg["realtime"]
-    assert realtime_cfg["tts_playback_rate"] == 1.4
+    assert realtime_cfg["tts_playback_rate"] == 1.8
     assert realtime_cfg["tts_compact"] is True
     assert realtime_cfg["tts_compact_template"] == "{position_text}, {name}"
     assert realtime_cfg["tts_cutoff_on_pass"] is True

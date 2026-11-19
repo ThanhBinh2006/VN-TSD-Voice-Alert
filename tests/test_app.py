@@ -95,7 +95,7 @@ def test_health(client: FlaskClient) -> None:
     body = client.get("/api/health").get_json()
     assert body["status"] == "ok" and body["fake"] is True
     assert set(body["models"]) == {"yolo", "faster_rcnn"}
-    assert body["frame_stride"] == 30
+    assert body["frame_stride"] == 1
 
 
 def test_video_job_end_to_end(client: FlaskClient, tmp_path: Path) -> None:

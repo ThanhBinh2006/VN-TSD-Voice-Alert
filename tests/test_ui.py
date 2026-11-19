@@ -69,7 +69,7 @@ def test_health_lists_accepted_extensions(client) -> None:
     assert ".mp4" in accept and ".jpg" in accept
     assert type(health["frame_stride"]) is int
     assert health["frame_stride"] > 0
-    assert health["frame_stride"] == 30
+    assert health["frame_stride"] == 1
 
 
 def test_voice_events_include_position(client, tmp_path) -> None:
@@ -147,7 +147,7 @@ def test_realtime_tts_controls_and_health_config(client) -> None:
     assert response.status_code == 200
     health = response.get_json()
     assert health["realtime"]["tts"] == {
-        "playback_rate": 1.4,
+        "playback_rate": 1.8,
         "compact": True,
         "cutoff_on_pass": True,
         "cutoff_grace_sec": 0.25,

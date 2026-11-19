@@ -39,13 +39,13 @@ def test_offline_config_restored_and_online_defaults():
 
     for pipeline in ("yolo", "faster_rcnn"):
         cfg = resolve_config(pipeline, "local")
-        assert cfg["online_preprocess"]["enabled"] is False
+        assert cfg["online_preprocess"]["enabled"] is True
         assert cfg["online_preprocess"]["occlusion_p"] == pytest.approx(0.30)
         assert cfg["online_preprocess"]["occlusion_ratio"] == pytest.approx(0.30)
         assert get_online_occlusion_config(cfg) == {
-            "enabled": False,
-            "p": 0.0,
-            "ratio": 0.0,
+            "enabled": True,
+            "p": pytest.approx(0.30),
+            "ratio": pytest.approx(0.30),
         }
 
     cfg_on = resolve_config("yolo", "local", {"online_preprocess": {"enabled": True}})
@@ -211,6 +211,7 @@ def test_yolo_pipeline_fit_wires_occlusion_trainer_only_when_enabled(tmp_path: P
             "paths": {"outputs_dir": str(tmp_path / "out_off")},
             "model": {"weights": str(tmp_path / "best_off.pt")},
             "eval": {"auto_eval_test": False},
+            "online_preprocess": {"enabled": False, "occlusion_p": 0.4, "occlusion_ratio": 0.5}
         },
     )
     mock_model_off = MagicMock()
