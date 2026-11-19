@@ -10,12 +10,12 @@ model:
   weights: models/yolo/best.pt  # checkpoint fine-tune dùng cho web app / suy luận
 
 train:
-  lr: 0.01
-  optimizer: auto               # auto, SGD, Adam, AdamW
+  lr: 0.0031
+  optimizer: SGD               # auto, SGD, Adam, AdamW
   # Optimization hyperparameters
-  momentum: 0.937               # Momentum của optimizer (SGD momentum / Adam beta1)
-  weight_decay: 0.0005          # Regularization (L2 weight decay)
-  warmup_epochs: 3.0            # Số epoch warmup
+  momentum: 0.9284               # Momentum của optimizer (SGD momentum / Adam beta1)
+  weight_decay: 0.0007        # Regularization (L2 weight decay)
+  warmup_epochs: 2.0252            # Số epoch warmup
   warmup_momentum: 0.8          # Momentum trong giai đoạn warmup
   warmup_bias_lr: 0.1           # Learning rate warmup cho bias
 
